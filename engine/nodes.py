@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import shlex
 import shutil
@@ -70,16 +71,23 @@ def _str(raw, scope: VarScope, default: str = '') -> str:
     return str(v)
 
 
-def _save(ex, key_name: str, value) -> None:
-    """把结果写进变量表。键名为空表示用户没要这个输出，直接跳过。"""
-    name = str(key_name or '').strip()
-    if name:
-        ex.vars.set(name, value)
-
-
 def _resolve_save_key(raw, scope: VarScope) -> str:
     """输出变量名本身也允许写 {{}} —— 例如循环里按轮次写不同变量。"""
     return interpolate(raw, scope).strip()
+
+
+def _input_point(ex, p):
+    name = str(p.get('point_var') or '').strip()
+    if name:
+        value = resolve(name, ex.vars) if '{{' in name else ex.vars.get(name)
+        if not isinstance(value, dict) or not all(isinstance(value.get(k), (int, float)) and math.isfinite(value[k]) for k in ('x', 'y')):
+            raise ValueError(f'坐标变量「{name}」不可用，请先成功找图或设置有效坐标')
+        x, y = round(value['x']), round(value['y'])
+        if ex.scale and value.get('space') != 'screen':
+            x, y = ex.scale(x, y)
+        return x, y
+    x, y = _int(p.get('x'), ex.vars), _int(p.get('y'), ex.vars)
+    return ex.scale(x, y) if ex.scale else (x, y)
 
 
 # ===========================================================================
@@ -89,11 +97,8 @@ def _resolve_save_key(raw, scope: VarScope) -> str:
 async def mouse(ex, p) -> None:
     scope = ex.vars
     action = str(p.get('action') or 'click')
-    x = _int(p.get('x'), scope)
-    y = _int(p.get('y'), scope)
+    x, y = _input_point(ex, p)
     button = str(p.get('button') or 'left')
-    if ex.scale:
-        x, y = ex.scale(x, y)
 
     if action == 'move':
         duration = max(0, _int(p.get('duration_ms'), scope))
@@ -101,7 +106,7 @@ async def mouse(ex, p) -> None:
             await asyncio.to_thread(inputctl.move, x, y, ex.input_mode, ex.window_hwnd)
         else:
             # 平滑移动：分成 ~24 帧，每帧都查一次停止标志（长距离拖拽时"停止"要能立刻生效）
-            start = await asyncio.to_thread(inputctl.probe_position) if hasattr(inputctl, 'probe_position') else None
+            start = await asyncio.to_thread(inputctl.cursor_pos)
             sx, sy = start if start else (x, y)
             steps = max(2, min(60, duration // 16))
             for i in range(1, steps + 1):
@@ -131,10 +136,37 @@ async def mouse(ex, p) -> None:
         await asyncio.to_thread(inputctl.mouse_up, x, y, button, ex.input_mode, ex.window_hwnd)
         await ex.log('debug', f'鼠标松开 {button} @ ({x}, {y})')
         return
+    if action == 'hold':
+        with inputctl.input_owner(object()):
+            await asyncio.to_thread(inputctl.mouse_down, x, y, button, ex.input_mode, ex.window_hwnd)
+            try:
+                await ex.sleep(max(0, _num(p.get('hold_ms'), scope, 60)) / 1000)
+            finally:
+                end_x = _int(p.get('end_x'), scope, x)
+                end_y = _int(p.get('end_y'), scope, y)
+                if ex.scale:
+                    # 起点已换算；只有显式填入的终点分量需要再换算。
+                    tx, ty = ex.scale(_int(p.get('end_x'), scope), _int(p.get('end_y'), scope))
+                    end_x = tx if p.get('end_x') not in (None, '') else x
+                    end_y = ty if p.get('end_y') not in (None, '') else y
+                await asyncio.to_thread(inputctl.mouse_up, end_x, end_y, button, ex.input_mode, ex.window_hwnd)
+        return
 
     btn = 'right' if action == 'right_click' else ('middle' if action == 'middle_click' else button)
-    clicks = 2 if action == 'double_click' else max(1, min(10, _int(p.get('clicks'), scope, 1)))
-    await asyncio.to_thread(inputctl.click, x, y, btn, clicks, ex.input_mode, ex.window_hwnd)
+    clicks = 2 if action == 'double_click' else max(1, min(10, _int(p.get('clicks'), scope, 1))) if action == 'click' else 1
+    click_mode = 'background_click' if getattr(ex, 'background_click', False) else ex.input_mode
+    with inputctl.input_owner(object()):
+        for index in range(clicks):
+            if ex.stopped:
+                return
+            await ex.wait_if_paused()
+            await asyncio.to_thread(inputctl.click_down, x, y, btn, click_mode, ex.window_hwnd, double=index % 2 == 1)
+            try:
+                await ex.sleep(max(0, _num(p.get('hold_ms'), scope, 60)) / 1000)
+            finally:
+                await asyncio.to_thread(inputctl.mouse_up, x, y, btn, click_mode, ex.window_hwnd)
+            if index < clicks-1:
+                await ex.sleep(max(0, _num(p.get('interval_ms'), scope, 40)) / 1000)
     await ex.log('debug', f'鼠标{"双击" if clicks == 2 else "点击"} {btn} x{clicks} @ ({x}, {y})')
 
 
@@ -154,10 +186,14 @@ async def keyboard(ex, p) -> None:
         await asyncio.to_thread(inputctl.key_up, keys, ex.input_mode, ex.window_hwnd)
         await ex.log('debug', f'按键松开 {keys}')
         return
-    await asyncio.to_thread(inputctl.key_down, keys, ex.input_mode, ex.window_hwnd)
-    if hold > 0:
-        await ex.sleep(hold / 1000.0)
-    await asyncio.to_thread(inputctl.key_up, keys, ex.input_mode, ex.window_hwnd)
+    # 点按使用临时所有者：不能松开同流程之前用 down 持续按住的同一个键。
+    with inputctl.input_owner(object()):
+        await asyncio.to_thread(inputctl.key_down, keys, ex.input_mode, ex.window_hwnd)
+        try:
+            if hold > 0:
+                await ex.sleep(hold / 1000.0)
+        finally:
+            await asyncio.to_thread(inputctl.key_up, keys, ex.input_mode, ex.window_hwnd)
     await ex.log('debug', f'按键 {keys}')
 
 
@@ -258,9 +294,12 @@ async def find_image(ex, p) -> None:
     key_found = _resolve_save_key(p.get('save_found'), scope)
     key_x = _resolve_save_key(p.get('save_x'), scope)
     key_y = _resolve_save_key(p.get('save_y'), scope)
+    key_point = _resolve_save_key(p.get('save_point'), scope)
     key_score = _resolve_save_key(p.get('save_score'), scope)
 
     def fail(msg: str) -> None:
+        if key_point:
+            ex.vars.set(key_point, None)
         if key_found:
             ex.vars.set(key_found, 'no')
         if key_x:
@@ -286,9 +325,12 @@ async def find_image(ex, p) -> None:
     threshold = _num(p.get('threshold'), scope, 0.85)
     timeout_ms = max(0, _int(p.get('timeout_ms'), scope, 5000))
     scope_mode = str(p.get('scope') or 'auto')
-    deadline = time.time() + timeout_ms / 1000.0
+    started, paused_base = time.monotonic(), ex._pause_total_ms()
 
     while not ex.stopped:
+        await ex.wait_if_paused()
+        if ex.stopped:
+            break
         try:
             frame, ox, oy = await asyncio.to_thread(ex.grab, scope_mode)
         except Exception as e:
@@ -298,8 +340,13 @@ async def find_image(ex, p) -> None:
         found, mx, my, score, scale = await asyncio.to_thread(
             vision.match_template_auto, frame, template, meta, threshold
         )
+        await ex.wait_if_paused()
+        if ex.stopped:
+            break
         if found:
             sx, sy = mx + ox, my + oy
+            if key_point:
+                ex.vars.set(key_point, {'x': sx, 'y': sy, 'space': 'screen'})
             if key_found:
                 ex.vars.set(key_found, 'yes')
             if key_x:
@@ -312,7 +359,7 @@ async def find_image(ex, p) -> None:
             ex.last_message = f'找到「{tpl_id}」@ ({sx}, {sy})'
             await ex.log('info', f'图像识别：找到「{tpl_id}」位置 ({sx}, {sy})，相似度 {score:.3f}{extra}')
             return
-        if time.time() >= deadline:
+        if ex._active_ms(started, paused_base) >= timeout_ms:
             await ex.log('info', f'图像识别：超时未找到「{tpl_id}」（最高相似度 {score:.3f}）')
             fail('未找到')
             return
@@ -362,6 +409,9 @@ async def color_check(ex, p) -> None:
     key_found = _resolve_save_key(p.get('save_found'), scope)
     key_x = _resolve_save_key(p.get('save_x'), scope)
     key_y = _resolve_save_key(p.get('save_y'), scope)
+    key_point = _resolve_save_key(p.get('save_point'), scope)
+    if key_point:
+        ex.vars.set(key_point, None)
     try:
         target = vision.parse_hex_color(_str(p.get('color'), scope, '#ff0000'))
     except ValueError as e:
@@ -387,6 +437,8 @@ async def color_check(ex, p) -> None:
 
     count, fx, fy = await asyncio.to_thread(vision.count_color, frame, target, tolerance)
     hit = count >= min_pixels
+    if key_point and hit:
+        ex.vars.set(key_point, {'x': fx + ox, 'y': fy + oy, 'space': 'screen'})
     if key_found:
         ex.vars.set(key_found, 'yes' if hit else 'no')
     if key_x:
@@ -536,7 +588,7 @@ async def wait(ex, p) -> None:
     mode = str(p.get('mode') or 'image')
     timeout_ms = max(0, _int(p.get('timeout_ms'), scope, 15000))
     key = _resolve_save_key(p.get('save_found'), scope)
-    deadline = time.time() + timeout_ms / 1000.0
+    started, paused_base = time.monotonic(), ex._pause_total_ms()
     on_timeout = str(p.get('on_timeout') or 'continue')
 
     # 预加载要用的东西（模板 / 目标色），避免在轮询里反复读盘
@@ -589,18 +641,24 @@ async def wait(ex, p) -> None:
         return vision.color_within(local, target_color, _int(p.get('tolerance'), scope, 12)), vision.to_hex_color(local)
 
     while not ex.stopped:
+        await ex.wait_if_paused()
+        if ex.stopped:
+            break
         try:
             ok, info = await asyncio.to_thread(satisfied)
         except Exception as e:
             await ex.log('warn', f'等待：检测失败（{e}），继续重试')
             ok, info = False, ''
+        await ex.wait_if_paused()
+        if ex.stopped:
+            break
         if ok:
             if key:
                 ex.vars.set(key, 'yes')
             ex.last_message = '等待条件已满足'
             await ex.log('info', f'等待：条件已满足{"（" + info + "）" if info else ""}')
             return
-        if time.time() >= deadline:
+        if timeout_ms > 0 and ex._active_ms(started, paused_base) >= timeout_ms:
             if key:
                 ex.vars.set(key, 'no')
             ex.last_message = '等待超时'
@@ -645,16 +703,13 @@ async def record(ex, p) -> None:
 async def autoclick(ex, p) -> None:
     scope = ex.vars
     try:
-        x = _int(p.get('x'), scope)
-        y = _int(p.get('y'), scope)
+        x, y = _input_point(ex, p)
         count = max(1, min(100000, _int(p.get('count'), scope, 10)))
         interval_ms = max(0, min(600000, _int(p.get('interval_ms'), scope, 100)))
     except (TypeError, ValueError):
         await ex.log('error', '连点器参数无效（坐标 / 次数 / 间隔必须是整数）')
         return
     button = str(p.get('button') or 'left')
-    if ex.scale:
-        x, y = ex.scale(x, y)
     rate = f'，约 {1000 / interval_ms:.1f} 次/秒' if interval_ms > 0 else ''
     await ex.log('info', f'连点器开始：坐标 ({x}, {y})，{count} 次，间隔 {interval_ms}ms{rate}')
     done = 0
@@ -667,7 +722,8 @@ async def autoclick(ex, p) -> None:
             await ex.log('warn', f'连点器被中断（已完成 {done}/{count} 次）')
             return
         try:
-            await asyncio.to_thread(inputctl.click, x, y, button, 1, ex.input_mode, ex.window_hwnd)
+            click_mode = 'background_click' if getattr(ex, 'background_click', False) else ex.input_mode
+            await asyncio.to_thread(inputctl.click, x, y, button, 1, click_mode, ex.window_hwnd)
             done += 1
         except Exception as e:
             await ex.log('warn', f'连点器第 {i + 1} 次点击失败: {e}')

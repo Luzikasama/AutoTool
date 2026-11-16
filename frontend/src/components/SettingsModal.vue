@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppIcon from './AppIcon.vue'
 /**
  * 设定面板（0.1.2 重做）：左侧分组导航 + 右侧卡片式设置行。
  *
@@ -26,6 +27,7 @@ import { useUiStore } from '../stores/ui'
 import { useEngineStore } from '../stores/engine'
 import { APPEARANCE_OPTIONS, appearanceLabel } from '../lib/appearance'
 import { clampPan, drawRect, outputSize } from '../lib/bgCrop'
+import HintIcon from './HintIcon.vue'
 
 const show = defineModel<boolean>('show', { default: false })
 const ui = useUiStore()
@@ -38,14 +40,14 @@ type NavKey = 'general' | 'appearance' | 'hotkeys' | 'data' | 'about'
 const NAV_GROUPS: { title?: string; items: { key: NavKey; label: string; icon: string }[] }[] = [
   {
     items: [
-      { key: 'general', label: '通用', icon: '⚙' },
-      { key: 'appearance', label: '外观', icon: '🎨' },
-      { key: 'hotkeys', label: '快捷键', icon: '⌨' },
+      { key: 'general', label: '通用', icon: 'settings' },
+      { key: 'appearance', label: '外观', icon: 'palette' },
+      { key: 'hotkeys', label: '快捷键', icon: 'keyboard' },
     ],
   },
   {
     title: '数据与安全',
-    items: [{ key: 'data', label: '数据管理', icon: '🗄' }],
+    items: [{ key: 'data', label: '数据管理', icon: 'database' }],
   },
 ]
 
@@ -53,7 +55,7 @@ const NAV_GROUPS: { title?: string; items: { key: NavKey; label: string; icon: s
 const ABOUT_ITEM: { key: NavKey; label: string; icon: string } = {
   key: 'about',
   label: '关于',
-  icon: 'ⓘ',
+  icon: 'info',
 }
 
 const NAV_TITLES: Record<NavKey, string> = {
@@ -100,6 +102,11 @@ async function openUrl(url: string) {
 }
 
 // ---------- 通用 ----------
+const inputBusy=ref(false)
+async function onBackgroundClick(value:boolean){
+  inputBusy.value=true
+  try{await eng.setBackgroundClick(value)}catch(error:any){message.error(error.message || '保存后台点击设置失败')}finally{inputBusy.value=false}
+}
 async function onToggleOverlay(v: boolean) {
   try {
     const on = await eng.toggleOverlay()
@@ -437,6 +444,7 @@ async function confirmCrop() {
 }
 
 watch(show, (v) => {
+  if(v)eng.syncInputSettings()
   if (v) {
     nextTick(() => measure())
     // 打开时拉一次快捷键（引擎侧是唯一事实来源；改键也在这里做）
@@ -479,7 +487,7 @@ onBeforeUnmount(() => {
               :class="{ on: nav === it.key && !draft }"
               @click="selectNav(it.key)"
             >
-              <span class="st-ico">{{ it.icon }}</span>
+              <span class="st-ico"><AppIcon :name="it.icon" /></span>
               <span class="st-label">{{ it.label }}</span>
             </button>
           </template>
@@ -491,7 +499,7 @@ onBeforeUnmount(() => {
             :class="{ on: nav === ABOUT_ITEM.key && !draft }"
             @click="selectNav(ABOUT_ITEM.key)"
           >
-            <span class="st-ico">{{ ABOUT_ITEM.icon }}</span>
+            <span class="st-ico"><AppIcon :name="ABOUT_ITEM.icon" /></span>
             <span class="st-label">{{ ABOUT_ITEM.label }}</span>
           </button>
         </div>
@@ -506,19 +514,20 @@ onBeforeUnmount(() => {
               {{ draft ? '按当前窗口比例裁切，所见即所得' : NAV_HINT[nav] }}
             </div>
           </div>
-          <button class="st-close" type="button" @click="show = false">×</button>
+          <button class="st-close" type="button" @click="show = false"><AppIcon name="x" /></button>
         </header>
 
         <div class="st-scroll">
           <!-- ---------------- 截取视图 ---------------- -->
           <template v-if="draft">
-            <div class="st-group-label">取景</div>
+            <div class="st-group-label">
+              取景
+              <HintIcon
+                text="拖动图片调整位置，用滑块缩放。框内看到的就是最终效果，按当前窗口比例裁切。"
+              />
+            </div>
             <div class="st-card">
               <div class="st-row col">
-                <p class="st-note">
-                  拖动图片调整位置，用滑块缩放。框内看到的就是最终效果（按当前窗口比例
-                  {{ frameW }}×{{ frameH }}）。
-                </p>
                 <div
                   id="agt-crop-frame"
                   class="crop-frame"
@@ -552,13 +561,30 @@ onBeforeUnmount(() => {
           <!-- ---------------- 通用 ---------------- -->
           <template v-else-if="nav === 'general'">
             <div class="st-group-label">常规</div>
+            <div class="st-card"><div class="st-row"><div class="st-row-main"><div class="st-row-title">后台点击</div><div class="st-row-desc">点击投递至绑定窗口，不移动系统鼠标。支持情况取决于目标软件；移动、拖拽、长按与键盘操作沿用真实输入。</div></div><div class="st-row-ctl"><n-switch :value="eng.backgroundClick" :loading="inputBusy" :disabled="inputBusy || !eng.connected" aria-label="后台点击" @update:value="onBackgroundClick" /></div></div></div>
+            <div class="st-card"><div class="st-row"><div class="st-row-main"><div class="st-row-title">运行时间容差 <HintIcon text="动作与并发关系按本次运行比较；时间偏差在容差内为绿色，超出为红色。找图提前完成属于正常，暂停不计入偏差。" /></div></div><div class="st-row-ctl"><input class="timeline-tolerance" type="number" min="0" max="10000" step="1" aria-label="运行时间容差" :value="ui.timelineTolerance" @change="ui.setTimelineTolerance(($event.target as HTMLInputElement).value)"> ms</div></div></div>
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">界面主题</div>
-                  <div class="st-row-desc">
-                    深色是原来的外观；「跟随系统」会跟着 Windows 的浅色/深色设置走（默认）。
-                    这个偏好只保存在本机浏览器里，不影响脚本文件。
+                  <div class="st-row-title">编辑模式</div>
+                  <div class="st-row-desc">简易模式合并常用操作、精简参数；专家模式显示完整流程与作用域。两种模式共用同一份脚本。</div>
+                </div>
+                <div class="st-row-ctl">
+                  <n-radio-group :value="ui.editorMode" size="small" @update:value="ui.setEditorMode">
+                    <n-radio-button value="simple">简易模式</n-radio-button>
+                    <n-radio-button value="expert">专家模式</n-radio-button>
+                  </n-radio-group>
+                </div>
+              </div>
+            </div>
+            <div class="st-card">
+              <div class="st-row">
+                <div class="st-row-main">
+                  <div class="st-row-title">
+                    界面主题
+                    <HintIcon
+                      text="「深色」是原来的外观；「跟随系统」会跟着 Windows 的浅色 / 深色设置走（默认）。这个偏好只保存在本机浏览器里，不影响脚本文件。"
+                    />
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -579,14 +605,14 @@ onBeforeUnmount(() => {
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">运行状态悬浮框</div>
-                  <div class="st-row-desc">
-                    运行时在屏幕角落显示一个小的状态条（进度、暂停/停止按钮），方便切到游戏窗口后
-                    还能操作。{{
-                      eng.overlayAvailable
-                        ? '开关会存进引擎配置，下次启动保持。'
-                        : '当前系统上不可用（引擎未就绪或不支持）。'
-                    }}
+                  <div class="st-row-title">
+                    运行状态悬浮框
+                    <HintIcon
+                      text="运行时在屏幕角落显示一个小的状态条（进度、暂停 / 停止按钮），方便切到游戏窗口后还能操作。开关会存进引擎配置，下次启动保持。"
+                    />
+                  </div>
+                  <div v-if="!eng.overlayAvailable" class="st-row-desc">
+                    当前系统上不可用（引擎未就绪或不支持）。
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -603,14 +629,20 @@ onBeforeUnmount(() => {
 
           <!-- ---------------- 外观 ---------------- -->
           <template v-else-if="nav === 'appearance'">
-            <div class="st-group-label">背景</div>
+            <div class="st-group-label">
+              背景
+              <HintIcon
+                text="换了台电脑打开同一个脚本不会跟着变样 —— 因为背景根本不在脚本里。"
+              />
+            </div>
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">自定义背景</div>
-                  <div class="st-row-desc">
-                    选一张本地图片，截取成屏幕比例后作为整个界面的背景。图片只保存在<b>本机浏览器</b>里，
-                    不会写进 <code>.agflow</code>，也不会上传到引擎。
+                  <div class="st-row-title">
+                    自定义背景
+                    <HintIcon
+                      text="选一张本地图片，截取成屏幕比例后作为整个界面的背景。图片只保存在本机浏览器里，不会写进 .agflow，也不会上传到引擎。"
+                    />
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -632,9 +664,11 @@ onBeforeUnmount(() => {
 
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">背景透明度</div>
-                  <div class="st-row-desc">
-                    透明度越高背景越显眼；面板与画布始终保留一层暗色底，保证文字和连线可读。
+                  <div class="st-row-title">
+                    背景透明度
+                    <HintIcon
+                      text="透明度越高背景越显眼；面板与画布始终保留一层暗色底，保证文字和连线可读。"
+                    />
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -670,15 +704,16 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
-
-            <p class="st-tip">
-              换了台电脑打开同一个脚本不会跟着变样 —— 因为背景根本不在脚本里。
-            </p>
           </template>
 
           <!-- ---------------- 快捷键 ---------------- -->
           <template v-else-if="nav === 'hotkeys'">
-            <div class="st-group-label">全局快捷键</div>
+            <div class="st-group-label">
+              全局快捷键
+              <HintIcon
+                text="点中间那一栏后按下想要的组合键即可，支持 ctrl / alt / shift / win + 字母、数字、f1-f12。同一组按键不能给两个功能用，保存时引擎会校验并提示冲突。"
+              />
+            </div>
             <div class="st-card">
               <div v-for="b in bindings" :key="b.id" class="st-row">
                 <div class="st-row-main">
@@ -709,11 +744,6 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <p class="st-tip">
-              点中间那一栏后按下想要的组合键即可，支持 ctrl / alt / shift / win + 字母、数字、f1-f12。
-              同一组按键不能给两个功能用，保存时引擎会校验并提示冲突。
-            </p>
-
             <div class="st-actions">
               <n-button size="small" quaternary @click="restoreHotkeyDefaults">恢复默认</n-button>
               <n-button size="small" type="primary" @click="saveHotkeys">保存快捷键</n-button>
@@ -726,11 +756,13 @@ onBeforeUnmount(() => {
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">界面偏好</div>
-                  <div class="st-row-desc">
-                    主题与背景图存在这台电脑的浏览器里（localStorage），
-                    换浏览器或清理浏览数据会丢。当前：{{ themeText }}
+                  <div class="st-row-title">
+                    界面偏好
+                    <HintIcon
+                      text="主题与背景图存在这台电脑的浏览器里（localStorage），换浏览器或清理浏览数据会丢。"
+                    />
                   </div>
+                  <div class="st-row-desc">当前：{{ themeText }}</div>
                 </div>
                 <div class="st-row-ctl">
                   <n-button size="small" @click="resetLocalPrefs">恢复默认</n-button>
@@ -738,8 +770,10 @@ onBeforeUnmount(() => {
               </div>
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">背景图占用</div>
-                  <div class="st-row-desc">浏览器给单个站点约 5 MB，超出会提示"保存失败"。</div>
+                  <div class="st-row-title">
+                    背景图占用
+                    <HintIcon text="浏览器给单个站点约 5 MB，超出会提示「保存失败」。" />
+                  </div>
                 </div>
                 <div class="st-row-ctl">
                   <span class="st-value">{{ bgSizeText }}</span>
@@ -751,10 +785,11 @@ onBeforeUnmount(() => {
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">存在哪里</div>
-                  <div class="st-row-desc">
-                    脚本只在你点「保存」时写进你自己选的 <code>.agflow</code> 文件；
-                    子脚本随父脚本一起写在这个文件里（子脚本不是单独的文件）。
+                  <div class="st-row-title">
+                    存在哪里
+                    <HintIcon
+                      text="脚本只在你点「保存」时写进你自己选的 .agflow 文件；子脚本随父脚本一起写在这个文件里（子脚本不是单独的文件）。"
+                    />
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -763,9 +798,9 @@ onBeforeUnmount(() => {
               </div>
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">全局快捷键</div>
-                  <div class="st-row-desc">
-                    存在引擎的 <code>config.json</code>（hotkeys 字段），因为全局钩子在引擎进程里。
+                  <div class="st-row-title">
+                    全局快捷键
+                    <HintIcon text="存在引擎的 config.json（hotkeys 字段），因为全局钩子在引擎进程里。" />
                   </div>
                 </div>
                 <div class="st-row-ctl">
@@ -779,15 +814,20 @@ onBeforeUnmount(() => {
 
           <!-- ---------------- 关于 ---------------- -->
           <template v-else>
-            <div class="st-group-label">版本</div>
+            <div class="st-group-label">
+              版本
+              <HintIcon text="本项目使用的第三方开源组件与许可，见随包附带的 THIRD-PARTY-NOTICES.md。" />
+            </div>
             <div class="st-card">
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">AutoTool</div>
-                  <div class="st-row-desc">可视化流程编辑器 + 本机自动化引擎（图像识别 / 键鼠）。</div>
+                  <div class="st-row-title">
+                    AutoTool
+                    <HintIcon text="可视化流程编辑器 + 本机自动化引擎（图像识别 / 键鼠）。" />
+                  </div>
                 </div>
                 <div class="st-row-ctl">
-                  <span class="st-value big">{{ eng.version || '—' }}</span>
+                  <span class="st-value big">{{ eng.version || '—' }} · 内部测试</span>
                 </div>
               </div>
               <div class="st-row">
@@ -818,18 +858,16 @@ onBeforeUnmount(() => {
               </div>
               <div class="st-row">
                 <div class="st-row-main">
-                  <div class="st-row-title">下载新版本 / 更新日志</div>
-                  <div class="st-row-desc">每次发布的说明与安装包、免安装版都在这里。</div>
+                  <div class="st-row-title">
+                    下载新版本 / 更新日志
+                    <HintIcon text="每次发布的说明与安装包、免安装版都在这里。" />
+                  </div>
                 </div>
                 <div class="st-row-ctl">
                   <n-button size="small" @click="openUrl(RELEASES_URL)">查看发布页</n-button>
                 </div>
               </div>
             </div>
-
-            <p class="st-tip">
-              本项目使用的第三方开源组件与许可，见随包附带的 <code>THIRD-PARTY-NOTICES.md</code>。
-            </p>
           </template>
         </div>
 
@@ -983,6 +1021,9 @@ onBeforeUnmount(() => {
 
 /* ---------- 卡片与设置行 ---------- */
 .st-group-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
   color: var(--text-dim);
   padding: 14px 2px 8px;
@@ -1017,6 +1058,9 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .st-row-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 13.5px;
   font-weight: 500;
 }
@@ -1060,17 +1104,6 @@ onBeforeUnmount(() => {
   line-height: 1.7;
   color: var(--text-dim);
   margin: 0;
-}
-.st-tip {
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-dim);
-  margin: 12px 2px 0;
-}
-.st-tip code {
-  background: var(--bg-card);
-  padding: 1px 4px;
-  border-radius: 4px;
 }
 .st-actions {
   display: flex;
@@ -1165,3 +1198,5 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 </style>
+
+<style scoped>.timeline-tolerance{width:80px;padding:6px;border:1px solid var(--border);border-radius:5px;background:var(--bg-panel);color:var(--text);font:inherit}</style>

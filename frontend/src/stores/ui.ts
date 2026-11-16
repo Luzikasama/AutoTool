@@ -41,6 +41,16 @@ function readMigrated(key: string, legacyKey: string): string | null {
 }
 
 export const useUiStore = defineStore('ui', () => {
+  const timelineTolerance=ref((()=>{try{const value=Number(localStorage.getItem('at.timeline-tolerance') ?? 50);return Number.isFinite(value)?Math.max(0,Math.min(10000,value)):50}catch{return 50}})())
+  function setTimelineTolerance(value:unknown){const n=Number(value);timelineTolerance.value=Number.isFinite(n)?Math.max(0,Math.min(10000,n)):50;try{localStorage.setItem('at.timeline-tolerance',String(timelineTolerance.value))}catch{}}
+  const editorSidebar = ref<'nodes'|'vars'>('nodes')
+  const editorMode = ref<'simple' | 'expert'>((() => {
+    try { return localStorage.getItem('at.editor-mode') === 'simple' ? 'simple' : 'expert' } catch { return 'expert' }
+  })())
+  function setEditorMode(value: unknown) {
+    editorMode.value = value === 'simple' ? 'simple' : 'expert'
+    try { localStorage.setItem('at.editor-mode', editorMode.value) } catch { /* 本次会话仍生效 */ }
+  }
   // data URL（已在裁剪节点里按屏幕比例裁好）
   const bgImage = ref('')
   // 背景图不透明度 0.05~1
@@ -156,6 +166,8 @@ export const useUiStore = defineStore('ui', () => {
   loadAppearance()
 
   return {
+    timelineTolerance,setTimelineTolerance,
+    editorSidebar, editorMode, setEditorMode,
     bgImage,
     bgOpacity,
     bgWarn,

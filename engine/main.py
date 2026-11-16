@@ -49,9 +49,9 @@ from window import (
     find_webui_window,
     find_window_of_pid,
     focus_window,
-    get_window_rect,
     is_minimized,
     list_windows,
+    window_rect_with_offset,
 )
 from ws_manager import manager
 
@@ -95,19 +95,16 @@ class ClickRequest(BaseModel):
     y: int
     button: str = "left"
     clicks: int = 1
-    mode: str = "real"
     window: int | None = None
 
 
 class KeyRequest(BaseModel):
     key: str
-    mode: str = "real"
     window: int | None = None
 
 
 class TextRequest(BaseModel):
     text: str
-    mode: str = "real"
     window: int | None = None
 
 
@@ -127,6 +124,10 @@ class OverlayRequest(BaseModel):
     enabled: bool
 
 
+class InputSettingsRequest(BaseModel):
+    background_click: bool
+
+
 executor = Executor(manager.broadcast)
 hotkey_manager: HotkeyManager | None = None
 picker: CoordinatePicker | None = None
@@ -136,6 +137,8 @@ _loop: asyncio.AbstractEventLoop | None = None
 
 _REPEAT_MIN, _REPEAT_MAX = 1, 99999
 _repeat_value = 1
+from repeatstate import RepeatState
+_repeat_state = RepeatState()
 # 页面标题（frontend/index.html 的 <title>），用于定位 WebUI 所在窗口
 _WEBUI_TITLE_HINT = "AutoTool"
 
@@ -257,12 +260,13 @@ async def _toggle_run(source: str = "快捷键") -> None:
     else:
         await executor.log("info", f"{source}：启动脚本")
         started = False
+        generation = executor.run_generation
         if manager.connections:
             await manager.broadcast({"type": "run_request", "ts": time.time()})
             # 最多等 1.2 秒：页面活着的话 /run 早就到了
             for _ in range(6):
                 await asyncio.sleep(0.2)
-                if executor.running:
+                if executor.running or executor.run_generation != generation:
                     started = True
                     break
             if not started:
@@ -271,7 +275,15 @@ async def _toggle_run(source: str = "快捷键") -> None:
                 enginelog.warn(msg)
                 await executor.log("warn", msg)
         if not started:
-            await executor.toggle()
+            flow = executor.current_flow
+            if not isinstance(flow, dict):
+                await executor.log("warn", "还没有可运行的流程，请先在编辑器中加载或创建脚本")
+                return
+            try:
+                await run(RunRequest(flow=flow))
+            except HTTPException as e:
+                if e.status_code != 409:
+                    await executor.log("error", f"缓存流程启动失败: {e.detail}")
 
 
 def _toggle_record() -> None:
@@ -279,15 +291,13 @@ def _toggle_record() -> None:
         recorder.toggle()
 
 
-def _sync_repeat(flow: dict) -> None:
+def _sync_repeat(flow: dict):
     """把流程里的循环轮数同步到引擎侧阴影值与悬浮框显示。"""
     global _repeat_value
-    try:
-        value = int(flow.get("repeat", 1))
-    except (TypeError, ValueError):
-        value = 1
-    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, value))
+    state, accepted = _repeat_state.sync(flow)
+    _repeat_value = state['value']
     overlay.set_repeat(_repeat_value)
+    return {'repeat_state': state, 'repeat_accepted': accepted}
 
 
 def _set_repeat_to(value: int) -> int:
@@ -301,7 +311,7 @@ def _set_repeat_to(value: int) -> int:
         v = int(value)
     except (TypeError, ValueError):
         v = _repeat_value
-    _repeat_value = max(_REPEAT_MIN, min(_REPEAT_MAX, v))
+    _repeat_value = _repeat_state.set(v)['value']
     overlay.set_repeat(_repeat_value)
     flow = executor.current_flow
     if isinstance(flow, dict):
@@ -419,16 +429,20 @@ async def _do_overlay_action(name: str) -> None:
     elif name == "toggle_record":
         _toggle_record()
     elif name in ("repeat_up", "repeat_down"):
+        if executor.running:
+            return
         value = _change_repeat(1 if name == "repeat_up" else -1)
-        await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
+        await manager.broadcast({"type": "repeat", **_repeat_state.snapshot(), "ts": time.time()})
     elif name.startswith("repeat_set:"):
+        if executor.running:
+            return
         # 悬浮框里直接输入循环次数（动作名带值：动作通道原本只传字符串，这里沿用它）
         try:
             wanted = int(name.split(":", 1)[1])
         except (IndexError, ValueError):
             return
         value = _set_repeat_to(wanted)
-        await manager.broadcast({"type": "repeat", "value": value, "ts": time.time()})
+        await manager.broadcast({"type": "repeat", **_repeat_state.snapshot(), "ts": time.time()})
         await executor.log("info", f"循环轮数设为 {value}")
     elif name == "focus_ui":
         await _focus_ui()
@@ -520,16 +534,18 @@ async def lifespan(_: FastAPI):
     watchdog.cancel()
     overlay.stop()
     executor.stop()
+    await _await_stop()
     if hotkey_manager:
         hotkey_manager.stop()
     if picker:
         picker.stop()
     if recorder:
         recorder.stop_all()
+    await manager.aclose()
     enginelog.info("清理完成，引擎退出")
 
 
-app = FastAPI(title="AutoTool Engine", version="0.1.5", lifespan=lifespan)
+app = FastAPI(title="AutoTool Engine", version="0.3.2", lifespan=lifespan)
 
 # ---- 本地访问控制（安全）----
 # 引擎监听 127.0.0.1，但浏览器里任何网页都能向它发请求（CSRF/DNS rebinding），
@@ -725,8 +741,8 @@ async def match(req: MatchRequest):
     offset_x = offset_y = 0
     try:
         if req.window:
-            rect = get_window_rect(req.window)
-            offset_x, offset_y = rect["left"], rect["top"]
+            rect = window_rect_with_offset(req.window)
+            offset_x, offset_y = rect["offset_x"], rect["offset_y"]
             # 用户主动点击的“测试匹配”：允许把最小化的窗口恢复出来（但不激活到前台）
             await _restore_audit(req.window, "测试匹配")
             frame = await asyncio.to_thread(capture_window, req.window, True)
@@ -744,29 +760,35 @@ async def match(req: MatchRequest):
     return result
 
 
+async def _manual_input(operation, *args):
+    # 与启动共用准入锁；调试输入在工作线程执行，不占住 ASGI 事件循环。
+    async with _run_lock:
+        if executor.reconcile():
+            raise HTTPException(409, "流程正在运行，请先停止再测试输入")
+        task = asyncio.create_task(asyncio.to_thread(operation, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # HTTP 请求被取消不等于线程结束，线程结束前不能允许另一流程启动。
+            await task
+            raise
+        except (ValueError, OSError) as e:
+            raise HTTPException(400, str(e)) from e
+
+
 @app.post("/input/click")
 async def api_click(req: ClickRequest):
     import inputctl
 
-    inputctl.click(req.x, req.y, req.button, req.clicks, req.mode, req.window)
+    await _manual_input(inputctl.click, req.x, req.y, req.button, req.clicks, 'real', req.window)
     return {"ok": True}
-
-
-@app.post("/input/probe")
-async def api_probe(req: ClickRequest):
-    """诊断模拟输入：报告目标子窗口/焦点窗口/客户区坐标/PostMessage 结果。"""
-    import inputctl
-
-    if not req.window:
-        raise HTTPException(400, "未绑定窗口")
-    return inputctl.probe(req.window, req.x, req.y)
 
 
 @app.post("/input/key")
 async def api_key(req: KeyRequest):
     import inputctl
 
-    inputctl.press_key(req.key, req.mode, req.window)
+    await _manual_input(inputctl.press_key, req.key, 'real', req.window)
     return {"ok": True}
 
 
@@ -774,7 +796,7 @@ async def api_key(req: KeyRequest):
 async def api_text(req: TextRequest):
     import inputctl
 
-    inputctl.type_text(req.text, req.mode, req.window)
+    await _manual_input(inputctl.type_text, req.text, 'real', req.window)
     return {"ok": True}
 
 
@@ -788,6 +810,8 @@ def _check_flow_or_400(flow: dict) -> None:
     """
     try:
         validate_flow(flow)
+        from flatgraph import compile_flow
+        validate_flow(compile_flow(flow))
     except ValueError as e:
         raise HTTPException(400, str(e))
     problems = validate_scripts(flow)
@@ -799,9 +823,9 @@ def _check_flow_or_400(flow: dict) -> None:
 async def load_flow(req: RunRequest):
     """仅加载流程（不执行），供快捷键启停使用。"""
     _check_flow_or_400(req.flow)
+    repeat_result = _sync_repeat(req.flow)
     executor.current_flow = req.flow
-    _sync_repeat(req.flow)
-    return {"ok": True}
+    return {"ok": True, **repeat_result}
 
 
 @app.post("/run")
@@ -813,13 +837,12 @@ async def run(req: RunRequest):
             raise HTTPException(409, "已有流程在运行")
         # 先置 running 再派生任务：/run/state 在任务起跑前就能反映真实状态，
         # 避免前端轮询在「POST 已返回、任务未起跑」的缝隙里读到假 idle 造成按钮闪烁
-        executor.running = True
-        executor.paused = False  # 新一轮不带上一轮遗留的暂停状态
-        _sync_repeat(req.flow)
-        executor.task = _spawn(executor.run(req.flow))
+        executor.prepare_run()
+        repeat_result = _sync_repeat(req.flow)
+        executor.task = _spawn(executor.run(req.flow, prepared=True))
     # 立即把状态推给悬浮框：不等 executor.run() 被调度到，悬浮框按钮马上变「停止」
     await _sync_run_state()
-    return {"ok": True}
+    return {"ok": True, **repeat_result}
 
 
 @app.post("/run/stop")
@@ -866,7 +889,14 @@ async def run_state():
     悬浮框侧由 _sync_run_state 一并纠正（它没有自己的轮询）。
     """
     running = await _sync_run_state()
-    return {"running": running, "paused": bool(executor.paused) if running else False}
+    return {"running": running, "paused": bool(executor.paused) if running else False, 'repeat_state': _repeat_state.snapshot()}
+
+
+@app.get("/run/timeline", include_in_schema=False)
+async def input_timeline(after_seq: int = 0, run_id: str = ''):
+    if executor.input_trace is not None:
+        return executor.input_trace.snapshot(after_seq, run_id)
+    return {"run_id": "", "project_id": "", "name": "", "running": False, "elapsed_ms": 0, "last_seq": 0, "dropped": 0, "events": []}
 
 
 @app.get("/config/hotkey")
@@ -916,6 +946,19 @@ async def set_hotkeys(req: HotkeysRequest):
         "；".join(f"{b['label']}={'+'.join(b['keys']) if b['enabled'] else '（未启用）'}" for b in bindings),
     )
     return {"bindings": bindings}
+
+
+@app.get('/config/input')
+async def get_input_settings():
+    return {'background_click': bool(appconfig.get('background_click', False))}
+
+
+@app.post('/config/input')
+async def set_input_settings(req: InputSettingsRequest):
+    if executor.running:
+        raise HTTPException(409, '请停止运行后再修改后台点击设置')
+    appconfig.update(background_click=req.background_click)
+    return {'background_click': req.background_click}
 
 
 @app.get("/overlay/state")
@@ -1173,7 +1216,28 @@ async def ws_endpoint(ws: WebSocket):
 # ---- 前端静态资源（打包后由引擎同源提供）----
 _frontend_dir = get_frontend_dir()
 if (_frontend_dir / "index.html").is_file():
-    app.mount("/assets", StaticFiles(directory=str(_frontend_dir / "assets")), name="assets")
+
+    class _NoCacheStatic(StaticFiles):
+        """本地静态资源一律不允许 HTTP 缓存。
+
+        为什么：桌面壳用 WebView2 打开 http://127.0.0.1:8765/，而 Chromium 对**没有
+        Cache-Control** 的响应会按 Last-Modified 估一个"启发式新鲜期"（约文件年龄的 10%）。
+        升级覆盖安装后，index.html 仍可能命中的是**上一版缓存**，于是页面继续引用旧哈希的
+        JS —— 那批文件已被新版删除（请求会 404），但缓存里还留着，照样能渲染出来。
+
+        0.1.6 实测踩到过：装完 0.1.6 打开，编辑器里还是 0.1.5 的界面
+        （`.vars-toggle` 找不到、`.insp-tabs` 还在）。
+
+        资源就在本机磁盘上、总量 1~2 MB，禁缓存的代价可以忽略；
+        再叠加上壳里 `?v=<版本号>` 的缓存键，升级后必然重新拉取。
+        """
+
+        def file_response(self, *args, **kwargs):
+            resp = super().file_response(*args, **kwargs)
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+
+    app.mount("/assets", _NoCacheStatic(directory=str(_frontend_dir / "assets")), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
@@ -1186,8 +1250,8 @@ if (_frontend_dir / "index.html").is_file():
             except (ValueError, OSError):
                 candidate = None
             if candidate and candidate.is_file():
-                return FileResponse(candidate)
-        return FileResponse(_frontend_dir / "index.html")
+                return FileResponse(candidate, headers={"Cache-Control": "no-store"})
+        return FileResponse(_frontend_dir / "index.html", headers={"Cache-Control": "no-store"})
 
 
 def _fatal_dialog(title: str, text: str) -> None:

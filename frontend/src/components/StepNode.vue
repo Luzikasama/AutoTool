@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, inject } from 'vue'
+import AppIcon from './AppIcon.vue'
+import { computed, inject, ref } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import { BRANCH_BODY, BRANCH_NEXT, BRANCH_NO, BRANCH_YES, CATEGORY_META, GROUP_META, GROUP_TYPE, NODE_META } from '../types'
 import { UNARY_OPS } from '../lib/nodeSchema'
 
 const props = defineProps<{
-  data: { nodeType: string; label: string; params: Record<string, any>; once?: boolean }
+  data: { nodeType: string; label: string; params: Record<string, any>; once?: boolean; simpleView?: {kind:string;label:string;count:number};simpleAdvanced?:boolean;foldMembers?:string[];foldCount?:number;foldLabel?:string }
   selected?: boolean
 }>()
 
@@ -18,14 +19,18 @@ const scriptExists = inject<(id: string) => boolean>('scriptExists', () => true)
 
 /** 组合节点：不属于六大类，用一整套独立的外观（配色 + 图标 + 双击提示） */
 const isGroup = computed(() => props.data.nodeType === GROUP_TYPE)
+const isFolded=computed(()=>!!props.data.foldMembers?.length)
+const isTimelineGraph = inject('isTimelineGraph', ref(false))
+const isTimeline = computed(() => isGroup.value && props.data.params?.execution === 'timeline')
 const meta = computed(() =>
   isGroup.value ? undefined : NODE_META[props.data.nodeType as keyof typeof NODE_META],
 )
 const cat = computed(() => (meta.value ? CATEGORY_META[meta.value.category] : undefined))
-const color = computed(() => (isGroup.value ? GROUP_META.color : cat.value?.color || '#888'))
+const color = computed(() => (isGroup.value || isFolded.value ? GROUP_META.color : cat.value?.color || '#888'))
 
-const isJudge = computed(() => props.data.nodeType === 'judge')
+const isJudge = computed(() => props.data.nodeType === 'judge' || props.data.simpleView?.kind === 'image_judge')
 const isLoop = computed(() => props.data.nodeType === 'loop')
+const isParallel=computed(()=>props.data.nodeType==='parallel'&&!props.data.foldMembers?.length)
 /** 终止节点没有出口：它的作用就是断在这里 */
 const isTerminate = computed(() => props.data.nodeType === 'terminate')
 const isScriptCall = computed(() => props.data.nodeType === 'script_call')
@@ -51,15 +56,20 @@ function condText(c: any): string {
 }
 
 const summary = computed(() => {
+  if(isFolded.value)return `${(props.data.foldCount || props.data.foldMembers!.length+1)} 个节点`
   const p = props.data.params || {}
+  if(props.data.foldCount)return `${props.data.foldCount} 个节点 · 双击展开`
   switch (props.data.nodeType) {
+    case 'parallel': return `${(p.branches || []).length} 条路径同时执行 · 等待全部结束`
+    case 'join': return '等待所有已启动的分支'
+    case 'scope': return `${(p.variables || []).length} 个局部变量 · 原地编辑`
     case GROUP_TYPE:
-      return groupSize.value ? `${groupSize.value} 个节点 · 双击编辑` : '（空）双击编辑'
+      return p.execution === 'parallel' ? `${groupSize.value} 条执行轴 · 并发 · 双击编辑` : isTimeline.value ? `${groupSize.value} 个动作 · 时序并发 · 双击编辑` : groupSize.value ? `${groupSize.value} 个节点 · 双击编辑` : '（空）双击编辑'
     case 'mouse': {
       const act = String(p.action || 'click')
       const label: Record<string, string> = {
         click: '单击', double_click: '双击', right_click: '右键',
-        middle_click: '中键', move: '移动', down: '按下', up: '松开', wheel: '滚轮',
+        middle_click: '中键', move: '移动', down: '按下', up: '松开', wheel: '滚轮', hold: '按住后松开',
       }
       if (act === 'wheel') return `滚轮 (${p.dx ?? 0}, ${p.dy ?? 0})`
       return `${label[act] || act} (${p.x ?? 0}, ${p.y ?? 0})`
@@ -147,10 +157,10 @@ const summary = computed(() => {
   }
 })
 
-const icon = computed(() => (isGroup.value ? GROUP_META.icon : meta.value?.icon || '❓'))
+const icon = computed(() => (isFolded.value ? 'package' : isTimeline.value ? 'timeline' : isGroup.value ? GROUP_META.icon : meta.value?.icon || 'circle-help'))
 const title = computed(
   () =>
-    (isGroup.value ? String(props.data.params?.name || '') : props.data.label) ||
+    (isFolded.value ? props.data.foldLabel || props.data.params?.name || '合并卡片' : isGroup.value ? String(props.data.params?.name || '') : props.data.label) ||
     (isGroup.value ? GROUP_META.label : meta.value?.label) ||
     props.data.nodeType,
 )
@@ -161,41 +171,46 @@ const title = computed(
        内联样式优先级高于样式表，一旦写死就没法用 .is-selected 类覆盖了。 -->
   <div
     class="step-node"
-    :class="{ 'is-selected': selected, 'is-broken': scriptMissing, 'is-group': isGroup }"
+    :class="{ 'is-selected': selected, 'is-broken': scriptMissing, 'is-group': isGroup || isFolded }"
     :style="{ '--node-color': color }"
   >
-    <Handle type="target" :position="Position.Left" />
-    <div class="step-icon" :style="{ background: color }">{{ icon }}</div>
+    <Handle v-if="!isTimelineGraph" type="target" :position="Position.Left" />
+    <div class="step-icon" :style="{ background: color }"><AppIcon :name="icon" :size="20" /></div>
     <div class="step-body">
       <div class="step-title">
-        {{ title }}
+        {{ isFolded ? title : data.simpleView?.label || title }}
         <span v-if="data.once" class="once-badge">单次</span>
       </div>
       <div class="step-summary" :class="{ broken: scriptMissing }">{{ summary }}</div>
-      <div v-if="isJudge" class="branch-legend">
-        <span class="branch-yes">● 是</span>
-        <span class="branch-no">● 否</span>
+      <div v-if="isTimelineGraph" class="step-summary">开始 {{ data.params.timeline?.start_ms || 0 }}ms</div>
+      <div v-if="isParallel" class="branch-legend parallel-legend"><span v-for="b in data.params.branches" :key="b.id">{{b.name || b.id}}</span></div>
+      <div v-else-if="isJudge" class="branch-legend">
+        <span class="branch-yes"><AppIcon name="record" :size="8" /> 是</span>
+        <span class="branch-no"><AppIcon name="record" :size="8" /> 否</span>
       </div>
       <div v-else-if="isLoop" class="branch-legend">
-        <span class="branch-body">● 循环体</span>
-        <span class="branch-next">● 结束</span>
+        <span class="branch-body"><AppIcon name="record" :size="8" /> 循环体</span>
+        <span class="branch-next"><AppIcon name="record" :size="8" /> 结束</span>
       </div>
     </div>
     <!-- 选中角标：放在节点框外右上角，用绝对定位，不参与布局（否则会改节点尺寸、
          触发 Vue Flow 的尺寸重测，节点会自己抖一下）。 -->
-    <span v-if="selected" class="sel-badge" aria-hidden="true">✓</span>
+    <span v-if="selected" class="sel-badge" aria-hidden="true"><AppIcon name="check" /></span>
     <!-- 子脚本缺失角标：同样绝对定位 -->
     <span v-if="scriptMissing" class="warn-badge" aria-hidden="true">!</span>
 
-    <template v-if="isJudge">
+    <template v-if="isParallel">
+      <Handle v-for="(branch,index) in data.params.branches || []" :key="branch.id" type="source" :id="branch.id" :position="Position.Right" :aria-label="branch.name" :style="{top:((Number(index)+1)/((data.params.branches || []).length+1)*100)+'%'}" />
+    </template>
+    <template v-else-if="isJudge && !data.foldMembers?.length">
       <Handle type="source" :id="BRANCH_YES" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
       <Handle type="source" :id="BRANCH_NO" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
     </template>
-    <template v-else-if="isLoop">
+    <template v-else-if="isLoop && !data.foldMembers?.length">
       <Handle type="source" :id="BRANCH_BODY" :position="Position.Right" :style="{ top: '28%' }" class="handle-yes" />
       <Handle type="source" :id="BRANCH_NEXT" :position="Position.Right" :style="{ top: '72%' }" class="handle-no" />
     </template>
-    <Handle v-else-if="!isTerminate" type="source" :position="Position.Right" />
+    <Handle v-else-if="!isTerminate && !isTimelineGraph" type="source" :position="Position.Right" />
   </div>
 </template>
 
@@ -357,3 +372,5 @@ const title = computed(
   border-color: #4c1111 !important;
 }
 </style>
+
+<style scoped>.parallel-legend{flex-wrap:wrap;gap:4px;max-width:245px}.parallel-legend span{color:var(--node-color);background:color-mix(in srgb,var(--node-color) 10%,transparent);padding:1px 5px;border-radius:4px;font-size:10px}</style>

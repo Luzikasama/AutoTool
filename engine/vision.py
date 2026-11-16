@@ -126,11 +126,6 @@ def _imwrite_unicode(path, img: np.ndarray) -> bool:
         return False
 
 
-def write_image(path, img: np.ndarray) -> bool:
-    """公开的"把 BGR 图写到任意路径"入口（对非 ASCII 路径安全）。"""
-    return _imwrite_unicode(path, img)
-
-
 def save_template(image_bgr: np.ndarray, name: str | None = None, meta: dict | None = None) -> str:
     tpl_id = _validate_tpl_id(name) if name else uuid.uuid4().hex[:12]
     path = _tpl_path(tpl_id)
@@ -410,14 +405,4 @@ def region_diff_ratio(frame_bgr: np.ndarray, reference_bgr: np.ndarray) -> float
     changed = np.count_nonzero(np.abs(g1 - g2) > 25)
     total = max(1, h * w)
     return float(changed) / float(total)
-
-
-def crop_region(frame_bgr: np.ndarray, region: dict) -> np.ndarray:
-    """按帧内坐标裁一块区域（越界自动收敛到有效范围）。"""
-    h, w = frame_bgr.shape[:2]
-    x0 = max(0, min(w, int(region.get('left', 0))))
-    y0 = max(0, min(h, int(region.get('top', 0))))
-    x1 = max(x0, min(w, x0 + int(region.get('width', 0))))
-    y1 = max(y0, min(h, y0 + int(region.get('height', 0))))
-    return frame_bgr[y0:y1, x0:x1]
 

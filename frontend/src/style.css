@@ -165,18 +165,24 @@ body {
 }
 .vue-flow__edge-path {
   stroke: var(--edge);
-  stroke-width: 4;
+  stroke-width: 2;
 }
 .vue-flow__edge.selected .vue-flow__edge-path,
 .vue-flow__edge:hover .vue-flow__edge-path {
   stroke: var(--accent);
 }
 .vue-flow__handle {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   background: var(--accent);
   border: 2px solid var(--bg);
 }
+.vue-flow__handle::after{content:'';position:absolute;inset:-7px;border-radius:50%}
+.vue-flow__handle:hover{box-shadow:0 0 0 5px var(--accent-soft)}
+.vue-flow__handle.valid{background:#16a34a;box-shadow:0 0 0 5px #16a34a26}
+.vue-flow__connection-path{stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4}
+.vue-flow__edge-path{transition:stroke .12s,filter .12s}
+.vue-flow__edge.selected .vue-flow__edge-path{stroke-width:2.5;filter:drop-shadow(0 0 2px var(--accent-soft))}
 .vue-flow__controls {
   border-radius: 8px;
   overflow: hidden;

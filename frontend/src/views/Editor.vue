@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppIcon from '../components/AppIcon.vue'
 /**
  * 编辑器外壳：浏览器式多标签 + 底部运行日志 + 底部控制条 + 设定 / 断连遮罩。
  *
@@ -17,18 +18,21 @@
  * 标签栏（`.tabstrip`）不在本组件里直接渲染位置，而是作为 `#tabs` 插槽交给各 pane，
  * 由 pane 放在自己的「新建 / 加载 / 保存」行下面 —— 标签属于那个编辑器，位置就该由它决定。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { NButton, useDialog, useMessage } from 'naive-ui'
 import EditorPane from './EditorPane.vue'
 import SettingsModal from '../components/SettingsModal.vue'
 import { goodbyeBeacon } from '../api/client'
 import { useDocsStore, type DocMeta } from '../stores/docs'
 import { useEngineStore } from '../stores/engine'
-import { useProjectStore } from '../stores/project'
+import {useWorkspaceStore,PANEL_TITLES} from '../stores/workspace'
+import {useUiStore} from '../stores/ui'
 
 const docs = useDocsStore()
 const eng = useEngineStore()
-const project = useProjectStore()
+const dock=useWorkspaceStore(),ui=useUiStore()
+const windowMenu=ref<HTMLDetailsElement|null>(null)
+function openPanel(id:string){dock.open(id);if(windowMenu.value)windowMenu.value.open=false}
 const dialog = useDialog()
 const message = useMessage()
 
@@ -40,9 +44,9 @@ const activeId = computed(() => docs.activeId)
 
 /** 标签图标：根脚本=文档、子脚本=包裹、组合节点=拼图（组合节点的编辑标签） */
 function tabIcon(t: DocMeta) {
-  if (t.kind === 'sub') return '📦'
-  if (t.kind === 'group') return '🧩'
-  return '📄'
+  if (t.kind === 'sub') return 'package'
+  if (t.kind === 'group') return 'workflow'
+  return 'file'
 }
 
 function addTab() {
@@ -135,44 +139,6 @@ function onTabClick(id: string) {
   docs.activate(id)
 }
 
-// ---------- 运行日志（底部面板，可收起；默认收起）----------
-// 默认不展开：日志只在真正要看的时候才占地方，开局先把画布留满。
-const logOpen = ref(false)
-const logHeight = ref(240)
-const logBody = ref<HTMLElement | null>(null)
-
-function startLogResize(e: MouseEvent) {
-  e.preventDefault()
-  const startY = e.clientY
-  const startH = logHeight.value
-  const onMove = (ev: MouseEvent) => {
-    logHeight.value = Math.max(120, Math.min(Math.round(window.innerHeight * 0.72), startH + (startY - ev.clientY)))
-  }
-  const onUp = () => {
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
-  }
-  window.addEventListener('mousemove', onMove)
-  window.addEventListener('mouseup', onUp)
-}
-
-watch(
-  () => project.logs.length,
-  async () => {
-    await Promise.resolve()
-    logBody.value?.scrollTo({ top: logBody.value.scrollHeight })
-  },
-)
-
-function formatTime(ts: number) {
-  const d = new Date(ts * 1000)
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  const ss = String(d.getSeconds()).padStart(2, '0')
-  const ms = String(d.getMilliseconds()).padStart(3, '0')
-  return `${hh}:${mm}:${ss}.${ms}`
-}
-
 // ---------- 悬浮框（全局开关，由引擎创建原生置顶小窗）----------
 async function toggleOverlay() {
   try {
@@ -238,7 +204,7 @@ onBeforeUnmount(() => {
               @pointerdown="onTabPointerDown(i, $event)"
               @click="onTabClick(t2.id)"
             >
-              <span class="tab-icon">{{ tabIcon(t2) }}</span>
+              <span class="tab-icon"><AppIcon :name="tabIcon(t2)" /></span>
               <span class="tab-name">{{ t2.name }}</span>
               <span v-if="t2.dirty" class="tab-dot" />
               <button
@@ -248,51 +214,21 @@ onBeforeUnmount(() => {
                 draggable="false"
                 @click.stop="requestClose(t2)"
               >
-                ×
+                <AppIcon name="x" />
               </button>
             </div>
-            <button class="tab-add" type="button" @click="addTab">＋</button>
+            <button class="tab-add" type="button" @click="addTab"><AppIcon name="plus" /></button>
           </div>
         </template>
       </EditorPane>
     </div>
 
-    <!-- 运行日志：贴在底部控制条上方，在布局里占位 —— 展开时把画布顶上去，
-         不是浮在画布上的小窗。上边沿可以往上拖加高；点底部「日志」图标收起 / 展开。
-         **默认收起**（打开应用时先给画布留满） -->
-    <div v-if="logOpen" class="logpanel" :style="{ height: logHeight + 'px' }">
-      <div class="logpanel-resize" @mousedown="startLogResize" />
-      <div class="logpanel-head">
-        <span class="logpanel-title">运行日志</span>
-        <button class="lf-btn" type="button" @click="project.clearLogs()">清空</button>
-        <button class="lf-btn" type="button" @click="logOpen = false">—</button>
-      </div>
-      <div ref="logBody" class="logpanel-body">
-        <div v-for="(l, i) in project.logs" :key="i" class="log-line" :class="l.level">
-          <span class="log-ts">{{ formatTime(l.ts) }}</span>
-          <span class="log-level">{{ l.level }}</span>
-          <span class="log-msg">{{ l.message }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 底部控制条：左下角设定齿轮（只有图标），右下角日志 / 悬浮框开关
-         （同样只有图标）。0.1.4 起**不再挂悬停说明**：按钮的含义靠图标本身表达。 -->
     <div class="bottombar">
-      <button class="bb-gear" type="button" @click="settingsVisible = true">⚙</button>
+      <button class="bb-gear" type="button" aria-label="设置" @click="settingsVisible=true"><AppIcon name="settings" /></button>
+      <span class="app-status">AutoTool[{{ui.editorMode==='simple'?'简易模式':'专家模式'}}]</span>
       <div class="spacer" />
-      <button class="bb-btn" type="button" :class="{ on: logOpen }" @click="logOpen = !logOpen">
-        <span class="bb-icon">▤</span>
-      </button>
-      <button
-        class="bb-btn"
-        type="button"
-        :class="{ on: eng.overlayEnabled }"
-        :disabled="!eng.overlayAvailable"
-        @click="toggleOverlay"
-      >
-        <span class="bb-icon">🪟</span>
-      </button>
+      <details ref="windowMenu" class="window-menu"><summary>窗口</summary><div class="window-items"><button v-for="(title,id) in PANEL_TITLES" :key="id" :data-open-panel="id" @click="openPanel(String(id))">{{title}}<span v-if="dock.panels.some(p=>p.id===id&&p.open)">✓</span></button><hr><button @click="dock.reset();windowMenu!.open=false">重置工作区</button></div></details>
+      <button class="bb-btn" type="button" aria-label="运行悬浮框" :class="{on:eng.overlayEnabled}" :disabled="!eng.overlayAvailable" @click="toggleOverlay"><AppIcon name="window" /></button>
     </div>
 
     <SettingsModal v-model:show="settingsVisible" />
@@ -622,4 +558,8 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
   margin: 0 0 14px;
 }
+</style>
+
+<style scoped>
+.app-status{font-size:12px;color:var(--text-dim)}.window-menu{position:relative;font-size:12px;color:var(--text)}.window-menu summary{cursor:pointer;list-style:none;padding:6px 12px;border-radius:5px}.window-menu[open] summary,.window-menu summary:hover{background:var(--hover)}.window-items{position:absolute;bottom:36px;right:0;width:175px;background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 30px #0005;padding:5px;z-index:120}.window-items button{display:flex;justify-content:space-between;width:100%;border:0;background:transparent;color:var(--text);padding:8px 12px;cursor:pointer;text-align:left;border-radius:4px}.window-items button:hover{background:var(--hover)}.window-items hr{border:0;border-top:1px solid var(--border);margin:4px}
 </style>

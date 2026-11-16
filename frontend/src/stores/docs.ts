@@ -69,6 +69,21 @@ function emptyRoot(name = '未命名脚本'): RootData {
 export const useDocsStore = defineStore('docs', () => {
   const tabs = ref<DocMeta[]>([])
   const activeId = ref('')
+  const repeatValues=ref<Record<string,number>>({})
+  function setRepeat(rootId:string,value:number){
+    const root=roots.get(rootId)
+    if(!root)return
+    const next=Math.max(1,Math.min(99999,Math.trunc(Number(value)||1))),changed=root.repeat!==next
+    if(!changed&&repeatValues.value[rootId]===next)return
+    root.repeat=next
+    repeatValues.value={...repeatValues.value,[rootId]:next}
+    if(changed)markDirty(rootId)
+  }
+  const nodeFocus = ref<{ tabId: string; nodeId: string; seq: number } | null>(null)
+
+  function focusNode(tabId: string, nodeId: string) {
+    nodeFocus.value = { tabId, nodeId, seq: (nodeFocus.value?.seq || 0) + 1 }
+  }
   /** rootId → [{id, name}]，供「调用脚本」下拉框使用（必须是响应式的，否则改名不刷新） */
   const scriptIndex = ref<Record<string, { id: string; name: string }[]>>({})
   /**
@@ -305,6 +320,10 @@ export const useDocsStore = defineStore('docs', () => {
   return {
     tabs,
     activeId,
+    repeatValues,
+    setRepeat,
+    nodeFocus,
+    focusNode,
     scriptIndex,
     rev,
     getRoot,

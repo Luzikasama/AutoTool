@@ -1,13 +1,11 @@
-"""键鼠控制：真实输入（pynput）与模拟输入（PostMessage 后台消息，不占用键鼠）。
-
-模拟输入要点：
-- 鼠标消息发给「该点下最深的子窗口」并用其客户区坐标（很多程序真正接收输入的是子窗口）
-- 键盘消息发给「目标窗口所在线程的焦点窗口」
-- 使用完整的 lParam（含扫描码），提升兼容性
-"""
+"""真实键鼠与可选窗口点击；租约保证并发来源互不提前释放，停止时统一清理。"""
 import ctypes
+import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from ctypes import wintypes
+import inputtrace
 
 from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key
@@ -19,51 +17,8 @@ _keyboard = KeyboardController()
 
 user32 = ctypes.windll.user32
 
-# ---- 正确的 API 签名（保证 64 位句柄不被截断）----
-user32.PostMessageW.restype = wintypes.BOOL
-user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-user32.IsWindow.restype = wintypes.BOOL
-user32.IsWindow.argtypes = [wintypes.HWND]
-user32.ScreenToClient.restype = wintypes.BOOL
-user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
-user32.WindowFromPoint.restype = wintypes.HWND
-user32.WindowFromPoint.argtypes = [wintypes.POINT]
-user32.GetAncestor.restype = wintypes.HWND
-user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
-user32.MapVirtualKeyW.restype = wintypes.UINT
-user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-user32.GetGUIThreadInfo.restype = wintypes.BOOL
-user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.c_void_p]
-user32.VkKeyScanW.restype = ctypes.c_short
-user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
 user32.GetCursorPos.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
-
-GA_ROOT = 2
-
-WM_MOUSEMOVE = 0x0200
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-WM_RBUTTONDOWN = 0x0204
-WM_RBUTTONUP = 0x0205
-WM_MBUTTONDOWN = 0x0207
-WM_MBUTTONUP = 0x0208
-WM_MOUSEWHEEL = 0x020A
-WM_KEYDOWN = 0x0100
-WM_KEYUP = 0x0101
-WM_CHAR = 0x0102
-
-_VK = {
-    "enter": 0x0D, "esc": 0x1B, "space": 0x20, "tab": 0x09,
-    "shift": 0x10, "ctrl": 0x11, "alt": 0x12, "win": 0x5B,
-    "backspace": 0x08, "delete": 0x2E, "home": 0x24, "end": 0x23,
-    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
-    "page_up": 0x21, "page_down": 0x22,
-    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
-    "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
-}
 
 _KEY_MAP = {
     "enter": Key.enter, "esc": Key.esc, "space": Key.space, "tab": Key.tab,
@@ -76,25 +31,7 @@ _KEY_MAP = {
     "f7": Key.f7, "f8": Key.f8, "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
 }
 
-# 扩展键（lParam bit 24 需置 1，否则方向键/编辑键在部分程序中错乱）
-_EXTENDED_VKS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2E, 0x5B, 0x5C, 0x5D}
-
 _MOD_KEYS = ("ctrl", "alt", "shift", "win")
-
-
-class GUITHREADINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("flags", wintypes.DWORD),
-        ("hwndActive", wintypes.HWND),
-        ("hwndFocus", wintypes.HWND),
-        ("hwndCapture", wintypes.HWND),
-        ("hwndMenuOwner", wintypes.HWND),
-        ("hwndMoveSize", wintypes.HWND),
-        ("hwndCaret", wintypes.HWND),
-        ("rcCaret", wintypes.RECT),
-    ]
-
 
 # ---------- 组合键解析 ----------
 def _split_combo(key: str) -> tuple[list[str], list[str]]:
@@ -105,158 +42,361 @@ def _split_combo(key: str) -> tuple[list[str], list[str]]:
     return mods, mains
 
 
+# ---------- 合成输入的「持有登记」 ----------
+# 为什么要记：脚本可以「按下不放 → 延时 → 松开」，也可以多个节点先后按住同一个键。
+# 只靠 pynput 自己管状态有两个问题：
+#   1) 同一键被两处按住时，先松手的那一处会把键真的弹起来（另一处以为还按着）；
+#   2) 流程被停止 / 抛异常时，没人去松，键就在系统层面一直按着，得手动敲一下才解开。
+# 同一执行来源重复 down 必须幂等；临时组合键使用独立所有者，不释放持续按住的键。
+# asyncio.to_thread 会复制 ContextVar，因此同一流程的不同工作线程仍属于同一来源。
+_DEFAULT_OWNER = object()
+_input_owner = ContextVar("input_owner", default=_DEFAULT_OWNER)
+_input_root = ContextVar("input_root", default=None)
+
+_held_lock = threading.RLock()
+_held: dict[tuple, dict] = {}
+
+
+class InputSession:
+    """运行结束后撤销准入；排队的旧工作线程不得重新按下已清理的键。"""
+    def __init__(self, parent=None):
+        self.parent = parent
+        self._closed = False
+
+    @property
+    def closed(self):
+        return self._closed or bool(getattr(self.parent, 'closed', False))
+
+    @closed.setter
+    def closed(self, value):
+        self._closed = bool(value)
+
+
+def _belongs_to(session, owner):
+    while session is not None:
+        if session is owner or session == owner:
+            return True
+        session = getattr(session, 'parent', None)
+    return False
+
+
+@contextmanager
+def input_session():
+    """并发轴有自己的准入和清理边界，同时属于外层运行。"""
+    session = InputSession(_input_root.get())
+    token = _input_root.set(session)
+    with input_owner(session):
+        try:
+            yield session
+        finally:
+            session.closed = True
+            _input_root.reset(token)
+
+
+def _require_active():
+    if getattr(_input_root.get(), 'closed', False) or getattr(_input_owner.get(), 'closed', False):
+        raise RuntimeError("本次输入会话已经停止")
+
+
+def current_owner():
+    return _input_owner.get()
+
+
+@contextmanager
+def input_owner(owner):
+    token = _input_owner.set(owner)
+    root_token = _input_root.set(owner) if _input_root.get() is None else None
+    try:
+        yield
+    finally:
+        if root_token is not None:
+            _input_root.reset(root_token)
+        _input_owner.reset(token)
+
+
+def _backend(mode: str, hwnd: int | None):
+    # 真实键鼠是全局设备，不能按绑定窗口分成互不相关的持有计数。
+    return ("real", 0)
+
+
+def _key_signature(key: str, mode: str, hwnd: int | None):
+    return ("key", *_backend(mode, hwnd), key)
+
+
+def _mouse_signature(button: str, mode: str, hwnd: int | None):
+    if mode == 'background_click':
+        return ('mouse', 'background_click', int(hwnd or 0), str(button))
+    return ("mouse", *_backend(mode, hwnd), str(button))
+
+
+def _key_primitives(key: str, mode: str, hwnd: int | None):
+    """返回同一物理键的 down / up。旧 mode 参数只为读取旧工程保留。"""
+    mk = _map_key(key)
+    return (lambda: _keyboard.press(mk)), (lambda: _keyboard.release(mk))
+
+
+def _mouse_primitives(button: str, mode: str, hwnd: int | None, x: int, y: int, double=False):
+    if mode == 'background_click':
+        from backgroundclick import prepare
+        button_mask=lambda:sum({'left':1,'right':2,'middle':16}.get(sig[3],0) for sig in _held if sig[:3]==('mouse','background_click',int(hwnd or 0)))
+        return prepare(hwnd, x, y, button, double, button_mask)
+    btn = _btn(button)
+
+    def _down():
+        _mouse.position = (int(x), int(y))
+        _mouse.press(btn)
+
+    def _up(position=None):
+        # 显式 mouse_up 在终点释放；异常清理只松开，不能把光标拉回 down 的起点。
+        if position is not None:
+            _mouse.position = (int(position[0]), int(position[1]))
+        _mouse.release(btn)
+
+    return _down, _up
+
+
+def _hold(sig: tuple, primitives, owner=None) -> bool:
+    """登记一次持有；只有第一个持有者真的发 down。返回是否发了 down。"""
+    down, up = primitives
+    if down is None:
+        raise ValueError(f"不支持的输入: {sig[-1]}")
+    owner = current_owner() if owner is None else owner
+    with _held_lock:
+        _require_active()
+        ent = _held.get(sig)
+        if ent:
+            ent["owners"].add(owner)
+            ent["roots"][owner] = _input_root.get() or owner
+            return False
+        _held[sig] = {"owners": {owner}, "roots": {owner: _input_root.get() or owner}, "up": up, "origin": inputtrace.location()}
+        try:
+            down()
+            inputtrace.emit('down', device=sig[0], key=sig[3], mode=sig[1], window=sig[2])
+        except BaseException:
+            # 后端可能在已发送 down 后才报错；补偿失败时保留登记供收尾重试。
+            try:
+                up()
+            except Exception:
+                pass
+            else:
+                _held.pop(sig, None)
+            raise
+        return True
+
+
+def _release(sig: tuple, primitives=None, strict: bool = False, *, owner=None, position=None) -> bool:
+    """撤销当前所有者的持有；最后一个持有者才发 up，失败保留登记并抛出异常。
+
+    `strict=False` 时，没有登记过的释放仍会真的发一次 up —— 保持老脚本
+    「直接 up 一个键」的旧行为，不能因为加了记账就悄悄不发了。
+    """
+    owner = current_owner() if owner is None else owner
+    with _held_lock:
+        ent = _held.get(sig)
+        if ent:
+            if owner not in ent["owners"]:
+                return False
+            if len(ent["owners"]) > 1:
+                ent["owners"].remove(owner)
+                ent["roots"].pop(owner, None)
+                return False
+            if position is None:
+                ent["up"]()
+            else:
+                ent["up"](position)
+            # 只有成功释放后才删除；失败不能被伪装成已经松开。
+            _held.pop(sig, None)
+            inputtrace.emit('up', device=sig[0], key=sig[3], mode=sig[1], window=sig[2])
+            return True
+        if strict or primitives is None:
+            return False
+        # 原语可延迟构建，已登记的 up 不需要重新解析可能已变化的焦点窗口。
+        _, up = primitives() if callable(primitives) else primitives
+        if up is None:
+            return False
+        if position is None:
+            up()
+        else:
+            up(position)
+        inputtrace.emit('up', device=sig[0], key=sig[3], mode=sig[1], window=sig[2])
+        return True
+
+
+def held_keys() -> list[tuple[str, int, str]]:
+    """当前还按着的 (模式, 窗口, 键/鼠标键)，诊断与测试用。"""
+    with _held_lock:
+        return [(sig[1], sig[2], sig[3]) for sig in _held]
+
+
+def release_all(owner=None) -> int:
+    """松开本进程通过合成输入按下的**全部**键与鼠标键，返回松开数量。
+
+    指定 owner 时只清理该来源及其临时动作。失败项保留并报告，之后可重试。
+    运行结束 / 停止 / 异常收尾时调用。以前停在「按下不放 → 延时」中间被停止，
+    那个键会一直保持按下状态（系统层面），得手动敲一下才解开 —— 这里兜住。
+    """
+    with _held_lock:
+        items = list(reversed(tuple(_held.items())))
+        n = 0
+        failures = []
+        for sig, ent in items:
+            if owner is not None:
+                matched = {o for o in ent["owners"] if o == owner or _belongs_to(ent["roots"].get(o), owner)}
+                if not matched:
+                    continue
+                if matched != ent["owners"]:
+                    ent["owners"].difference_update(matched)
+                    for item in matched:
+                        ent["roots"].pop(item, None)
+                    continue
+            try:
+                ent["up"]()
+                _held.pop(sig, None)
+                inputtrace.emit('up', origin=ent.get('origin'), device=sig[0], key=sig[3], mode=sig[1], window=sig[2], cleanup=True)
+                n += 1
+            except Exception as e:
+                failures.append((sig, e))
+        if failures:
+            raise RuntimeError(f"有 {len(failures)} 个输入释放失败（已松开 {n} 个），保留登记以便重试") from failures[0][1]
+        return n
+
+
 # ---------- 公共入口 ----------
+def click_down(x, y, button='left', mode='real', hwnd=None, double=False):
+    with _held_lock:
+        if _mouse_signature(button, mode, hwnd) in _held:
+            raise ValueError('鼠标键仍被按住，不能执行独立点击')
+        mouse_down(x, y, button, mode, hwnd, double=double)
+
+
 def click(x: int, y: int, button: str = "left", clicks: int = 1, mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        _sim_click(int(hwnd), int(x), int(y), button, int(clicks))
-    else:
-        _real_click(int(x), int(y), button, int(clicks))
+    with _held_lock, input_owner(object()):
+        if _mouse_signature(button, mode, hwnd) in _held:
+            raise ValueError("鼠标键仍被按住，不能执行独立点击")
+        try:
+            if mode == 'background_click':
+                for index in range(max(1, min(10, int(clicks)))):
+                    mouse_down(x, y, button, mode, hwnd, double=index % 2 == 1)
+                    mouse_up(x, y, button, mode, hwnd)
+                    if index < clicks - 1:
+                        time.sleep(0.05)
+            else:
+                _real_click(int(x), int(y), button, int(clicks))
+        finally:
+            release_all(owner=current_owner())
 
 
 def move(x: int, y: int, mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        target = _target_at(int(hwnd), int(x), int(y))
-        cx, cy = _to_client(target, int(x), int(y))
-        user32.PostMessageW(target, WM_MOUSEMOVE, 0, _mouse_lparam(cx, cy))
-    else:
-        _mouse.position = (int(x), int(y))
+    _require_active()
+    _mouse.position = (int(x), int(y))
+    inputtrace.emit('move', x=x, y=y, mode='real', window=hwnd or 0)
 
 
-def cursor_pos() -> tuple[int, int]:
-    """当前鼠标的屏幕坐标。「鼠标操作-平滑移动」用它取起点。"""
-    pt = wintypes.POINT()
-    if user32.GetCursorPos(ctypes.byref(pt)):
-        return int(pt.x), int(pt.y)
+def cursor_pos() -> tuple[int, int] | None:
+    """当前鼠标的屏幕坐标；取不到（极少见）时返回 None。
+
+    调用方是「鼠标操作-平滑移动」：它用这个点当插值起点，取不到就退化成"直接跳到目标"。
+    """
     try:
-        x, y = _mouse.position
-        return int(x), int(y)
+        pt = wintypes.POINT()
+        if user32.GetCursorPos(ctypes.byref(pt)):
+            return int(pt.x), int(pt.y)
     except Exception:
-        return 0, 0
+        pass
+    return None
 
 
 def press_key(key: str, mode: str = "real", hwnd: int | None = None) -> None:
-    """按下并抬起按键，支持 "ctrl+shift+a" 组合键。"""
+    """按下并抬起按键，支持 "ctrl+shift+a" 组合键。
+
+    组合键当成**一次事务**：修饰键先按下、主键 down/up、修饰键最后逆序抬起。
+    中途任何一步抛异常，已经按下的修饰键也会在 finally 里松开 ——
+    否则一次失败就会把 Ctrl 卡在按下状态（后面所有点击都变成 Ctrl+点击）。
+    """
     mods, mains = _split_combo(key)
     if not mains:
         mains = mods  # 纯修饰键（如单独 "ctrl"）按普通键处理
         mods = []
-    if mode == "simulated" and hwnd:
-        target = _focus_of(int(hwnd))
-        mod_vks = [v for v in (_key_to_vk(m) for m in mods) if v]
-        main_vks = [v for v in (_key_to_vk(k) for k in mains) if v]
-        if not main_vks:
-            return
-        for vk in mod_vks:
-            user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
-        for vk in main_vks:
-            user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
-            time.sleep(0.03)
-            user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
-        for vk in reversed(mod_vks):
-            user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
-    else:
-        pressed_mods = []
-        for m in mods:
-            _keyboard.press(_map_key(m))
-            pressed_mods.append(m)
-        for k in mains:
-            mk = _map_key(k)
-            _keyboard.press(mk)
-            _keyboard.release(mk)
-        for m in reversed(pressed_mods):
-            _keyboard.release(_map_key(m))
+    gap = 0.0
+    # 短组合键事务串行提交，不能在 Ctrl down 与 Ctrl up 之间插入另一线程的组合键。
+    with _held_lock, input_owner(object()):
+        try:
+            for m in mods:
+                prim = _key_primitives(m, mode, hwnd)
+                sig = _key_signature(m, mode, hwnd)
+                _hold(sig, prim)
+            for k in mains:
+                prim = _key_primitives(k, mode, hwnd)
+                sig = _key_signature(k, mode, hwnd)
+                _hold(sig, prim)
+                try:
+                    if gap:
+                        time.sleep(gap)
+                finally:
+                    _release(sig, strict=True)
+        finally:
+            # 尝试每个修饰键，不让一个 up 失败阻止其他修饰键的释放。
+            release_all(owner=current_owner())
 
 
 def type_text(text: str, mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        target = _focus_of(int(hwnd))
-        for ch in str(text):
-            user32.PostMessageW(target, WM_CHAR, ord(ch), 1)
-            time.sleep(0.01)
-    else:
-        _keyboard.type(str(text))
+    _require_active()
+    started = time.monotonic()
+    for ch in str(text):
+        _require_active()
+        _keyboard.type(ch)
+    inputtrace.emit('text', chars=len(str(text)), duration_ms=(time.monotonic()-started)*1000, mode='real', window=hwnd or 0)
 
 
-def mouse_down(x: int, y: int, button: str = "left", mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        target = _target_at(int(hwnd), int(x), int(y))
-        cx, cy = _to_client(target, int(x), int(y))
-        user32.PostMessageW(target, _down_msg(button), 0, _mouse_lparam(cx, cy))
-    else:
-        _mouse.position = (int(x), int(y))
-        _mouse.press(_btn(button))
+def mouse_down(x: int, y: int, button: str = "left", mode: str = "real", hwnd: int | None = None, double=False) -> None:
+    sig = _mouse_signature(button, mode, hwnd)
+    _hold(sig, _mouse_primitives(button, mode, hwnd, x, y, double))
 
 
 def mouse_up(x: int, y: int, button: str = "left", mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        target = _target_at(int(hwnd), int(x), int(y))
-        cx, cy = _to_client(target, int(x), int(y))
-        user32.PostMessageW(target, _up_msg(button), 0, _mouse_lparam(cx, cy))
-    else:
-        _mouse.position = (int(x), int(y))
-        _mouse.release(_btn(button))
+    sig = _mouse_signature(button, mode, hwnd)
+    _release(sig, lambda: _mouse_primitives(button, mode, hwnd, x, y), position=(x, y))
 
 
 def key_down(key: str, mode: str = "real", hwnd: int | None = None) -> None:
-    if mode == "simulated" and hwnd:
-        target = _focus_of(int(hwnd))
-        for part in [p.strip().lower() for p in str(key).split("+") if p.strip()]:
-            vk = _key_to_vk(part)
-            if vk:
-                user32.PostMessageW(target, WM_KEYDOWN, vk, _key_lparam(vk, False))
-    else:
-        for part in [p.strip().lower() for p in str(key).split("+") if p.strip()]:
-            _keyboard.press(_map_key(part))
+    opened = []
+    with _held_lock:
+        try:
+            for part in dict.fromkeys(p.strip().lower() for p in str(key).split("+") if p.strip()):
+                sig = _key_signature(part, mode, hwnd)
+                already_owned = current_owner() in _held.get(sig, {}).get("owners", ())
+                _hold(sig, _key_primitives(part, mode, hwnd))
+                if not already_owned:
+                    opened.append(sig)
+        except BaseException:
+            for sig in reversed(opened):
+                try:
+                    _release(sig, strict=True)
+                except Exception:
+                    pass  # 失败项保留登记，流程收尾仍会再次尝试。
+            raise
 
 
 def key_up(key: str, mode: str = "real", hwnd: int | None = None) -> None:
-    parts = [p.strip().lower() for p in str(key).split("+") if p.strip()]
-    if mode == "simulated" and hwnd:
-        target = _focus_of(int(hwnd))
+    parts = list(dict.fromkeys(p.strip().lower() for p in str(key).split("+") if p.strip()))
+    errors = []
+    with _held_lock:
         for part in reversed(parts):
-            vk = _key_to_vk(part)
-            if vk:
-                user32.PostMessageW(target, WM_KEYUP, vk, _key_lparam(vk, True))
-    else:
-        for part in reversed(parts):
-            _keyboard.release(_map_key(part))
+            sig = _key_signature(part, mode, hwnd)
+            try:
+                _release(sig, lambda: _key_primitives(part, mode, hwnd))
+            except Exception as e:
+                errors.append(e)
+        if errors:
+            raise errors[0]
 
 
 def scroll(dx: int, dy: int, mode: str = "real", hwnd: int | None = None,
            x: int | None = None, y: int | None = None) -> None:
-    """滚轮。模拟模式用 PostMessage(WM_MOUSEWHEEL) 发给目标窗口焦点，不占用物理鼠标。"""
-    if mode == "simulated" and hwnd:
-        target = _focus_of(int(hwnd))
-        # WM_MOUSEWHEEL: wParam 高 16 位为 delta（120 的倍数），lParam 为屏幕坐标
-        if x is None or y is None:
-            pt = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            x, y = pt.x, pt.y
-        delta = int(dy) * 120
-        wparam = (int(delta) & 0xFFFF) << 16
-        lparam = ((int(y) & 0xFFFF) << 16) | (int(x) & 0xFFFF)
-        user32.PostMessageW(target, WM_MOUSEWHEEL, wparam, lparam)
-    else:
-        _mouse.scroll(int(dx), int(dy))
-
-
-def probe(hwnd: int, x: int, y: int) -> dict:
-    """诊断：报告目标窗口/子窗口/坐标/PostMessage 结果。"""
-    h = int(hwnd)
-    valid = bool(user32.IsWindow(h))
-    target = _target_at(h, int(x), int(y))
-    cx, cy = _to_client(target, int(x), int(y))
-    focus = _focus_of(h)
-    ok = bool(user32.PostMessageW(target, WM_MOUSEMOVE, 0, _mouse_lparam(cx, cy)))
-    return {
-        "hwnd": h,
-        "hwnd_valid": valid,
-        "child": int(target),
-        "child_is_hwnd": int(target) == h,
-        "client": [cx, cy],
-        "focus": int(focus),
-        "post_ok": ok,
-    }
+    """向物理鼠标设备提交滚轮事件。"""
+    _require_active()
+    _mouse.scroll(int(dx), int(dy))
+    inputtrace.emit('scroll', dx=dx, dy=dy, mode='real', window=hwnd or 0)
 
 
 # ---------- 真实输入 ----------
@@ -264,72 +404,10 @@ def _real_click(x: int, y: int, button: str, clicks: int) -> None:
     _mouse.position = (x, y)
     time.sleep(0.05)
     for i in range(max(1, clicks)):
-        _mouse.click(_btn(button))
+        mouse_down(x, y, button)
+        mouse_up(x, y, button)
         if i < clicks - 1:
             time.sleep(0.05)
-
-
-# ---------- 模拟输入内部 ----------
-def _sim_click(hwnd: int, x: int, y: int, button: str, clicks: int) -> None:
-    target = _target_at(hwnd, x, y)
-    cx, cy = _to_client(target, x, y)
-    lp = _mouse_lparam(cx, cy)
-    down, up = _down_msg(button), _up_msg(button)
-    for _ in range(max(1, clicks)):
-        user32.PostMessageW(target, WM_MOUSEMOVE, 0, lp)
-        time.sleep(0.02)
-        user32.PostMessageW(target, down, 0, lp)
-        time.sleep(0.03)
-        user32.PostMessageW(target, up, 0, lp)
-        time.sleep(0.03)
-
-
-def _target_at(hwnd: int, sx: int, sy: int) -> int:
-    """返回该屏幕点下、与目标窗口同一根窗口的最深子窗口。"""
-    try:
-        pt = wintypes.POINT(int(sx), int(sy))
-        child = user32.WindowFromPoint(pt)
-        if child and user32.GetAncestor(child, GA_ROOT) == user32.GetAncestor(hwnd, GA_ROOT):
-            return int(child)
-    except Exception:
-        pass
-    return int(hwnd)
-
-
-def _to_client(hwnd: int, sx: int, sy: int):
-    pt = wintypes.POINT(int(sx), int(sy))
-    user32.ScreenToClient(hwnd, ctypes.byref(pt))
-    return pt.x, pt.y
-
-
-def _focus_of(hwnd: int) -> int:
-    """返回目标窗口所属线程的焦点窗口（键盘消息应发给它）。"""
-    try:
-        tid = user32.GetWindowThreadProcessId(hwnd, None)
-        gti = GUITHREADINFO()
-        gti.cbSize = ctypes.sizeof(GUITHREADINFO)
-        if user32.GetGUIThreadInfo(tid, ctypes.byref(gti)):
-            if gti.hwndFocus:
-                return int(gti.hwndFocus)
-            if gti.hwndActive:
-                return int(gti.hwndActive)
-    except Exception:
-        pass
-    return int(hwnd)
-
-
-def _mouse_lparam(cx: int, cy: int) -> int:
-    return ((int(cy) & 0xFFFF) << 16) | (int(cx) & 0xFFFF)
-
-
-def _key_lparam(vk: int, up: bool) -> int:
-    scan = int(user32.MapVirtualKeyW(int(vk), 0)) & 0xFF
-    lp = 1 | (scan << 16)
-    if int(vk) in _EXTENDED_VKS:
-        lp |= 1 << 24  # 扩展键标志（方向键/Ins/Del/Win 等）
-    if up:
-        lp |= (1 << 30) | (1 << 31)
-    return lp
 
 
 def _btn(button: str):
@@ -338,34 +416,6 @@ def _btn(button: str):
     if button == "middle":
         return Button.middle
     return Button.left
-
-
-def _down_msg(button: str) -> int:
-    if button == "right":
-        return WM_RBUTTONDOWN
-    if button == "middle":
-        return WM_MBUTTONDOWN
-    return WM_LBUTTONDOWN
-
-
-def _up_msg(button: str) -> int:
-    if button == "right":
-        return WM_RBUTTONUP
-    if button == "middle":
-        return WM_MBUTTONUP
-    return WM_LBUTTONUP
-
-
-def _key_to_vk(key: str) -> int | None:
-    k = str(key).lower()
-    if k in _VK:
-        return _VK[k]
-    if len(k) == 1:
-        # 注意：VkKeyScanW 接收「字符」而不是整数
-        vk = user32.VkKeyScanW(k)
-        if vk != -1:
-            return int(vk) & 0xFF
-    return None
 
 
 def _map_key(key: str):

@@ -112,13 +112,6 @@ def list_windows() -> list[dict]:
     return result
 
 
-def get_window(hwnd: int) -> dict | None:
-    for w in list_windows():
-        if w["hwnd"] == hwnd:
-            return w
-    return None
-
-
 def capture_window(hwnd: int, restore_minimized: bool = False) -> np.ndarray:
     """截取指定窗口内容（PrintWindow，可捕获被遮挡/DirectX 窗口），返回 BGR。
 
@@ -659,10 +652,6 @@ def find_pids_by_name(name: str) -> list[int]:
     else:
         target_exe = target
     return [p['pid'] for p in list_processes() if p['name'] in (target, target_exe)]
-
-
-def is_process_running(name: str) -> bool:
-    return bool(find_pids_by_name(name))
 
 
 def kill_process(name: str) -> int:

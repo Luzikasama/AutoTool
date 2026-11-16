@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import ast
+import json
+import math
 import re
 from typing import Any
 
@@ -59,17 +61,25 @@ class VarScope:
     # ------------------------------------------------------------ 读
     def has(self, name: str) -> bool:
         """变量是否可见（本层或任意上层）。"""
-        key = str(name)
-        if key in self.vars:
-            return True
-        return self.parent.has(key) if self.parent is not None else False
+        marker = object()
+        return self.get(name, marker) is not marker
 
     def get(self, name: str, default: Any = None) -> Any:
         key = str(name)
         if key in self.vars:
             return self.vars[key]
-        if self.parent is not None:
-            return self.parent.get(key, default)
+        current = self.parent
+        while current is not None:
+            if key in current.vars:
+                return current.vars[key]
+            current = current.parent
+        # 只访问坐标数据的 x/y，不访问 Python 对象属性；完整变量名始终优先。
+        if '.' in key:
+            base, field = key.rsplit('.', 1)
+            if field in ('x', 'y'):
+                value = self.get(base)
+                if isinstance(value, dict) and field in value:
+                    return value[field]
         return default
 
     # ------------------------------------------------------------ 写
@@ -98,13 +108,8 @@ class VarScope:
         return r
 
     def delete(self, name: str) -> None:
-        """删除变量：本层有就删本层，否则继续往上层找（与"读"的查找顺序一致）。"""
-        key = str(name or '').strip()
-        if key in self.vars:
-            self.vars.pop(key, None)
-            return
-        if self.parent is not None:
-            self.parent.delete(key)
+        """删除当前作用域的变量；跨层删除必须显式使用 delete_global。"""
+        self.vars.pop(str(name or '').strip(), None)
 
     # ------------------------------------------------------------ 其它
     def child(self, declared: Any = None) -> "VarScope":
@@ -172,6 +177,18 @@ def coerce(value: Any, var_type: str = 'auto') -> Any:
     if isinstance(v, str):
         v = v.strip()
     t = str(var_type or 'auto')
+    if t == 'point':
+        try:
+            raw = json.loads(v) if isinstance(v, str) and v.startswith('{') else v
+            if isinstance(raw, str):
+                raw = raw.replace('，', ',').split(',')
+            x, y = (raw['x'], raw['y']) if isinstance(raw, dict) else raw[:2]
+            x, y = float(x), float(y)
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise ValueError('坐标必须有限')
+            return {'x': x, 'y': y, 'space': raw.get('space', 'design') if isinstance(raw, dict) else 'design'}
+        except (ValueError, TypeError, KeyError, IndexError):
+            return None
     if t == 'string':
         return '' if v is None else str(v)
     if t == 'number':

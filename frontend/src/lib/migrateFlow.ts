@@ -1,3 +1,4 @@
+import {flattenGraph} from './flatFlow'
 /**
  * 老脚本 → 当前节点体系的**就地升级**（0.1.3 节点体系 + 0.1.4 变量/输入方式）。
  *
@@ -145,7 +146,7 @@ export function migrateFlow(
   legacy = false,
 ): MigrateResult {
   const notes: string[] = []
-  const nodes: any[] = Array.isArray(nodesIn) ? nodesIn.map((n) => ({ ...n })) : []
+  const nodes: any[] = Array.isArray(nodesIn) ? nodesIn.map((n) => JSON.parse(JSON.stringify(n))) : []
   const edges: any[] = Array.isArray(edgesIn) ? edgesIn.map((e) => ({ ...e })) : []
 
   const used = new Set<string>(nodes.map((n) => String(n?.id ?? '')).filter(Boolean))
@@ -207,19 +208,20 @@ export function migrateFlow(
         condition: { left: params.save_found || 'found', op: '==', right: 'yes' },
         condition2: { left: '', op: '==', right: '' },
       })
+      fi.data.simple = { kind: 'image_judge', judgeId: node.id }
       out.push(fi, node)
       notes.push('「找图判断」节点已按新规范拆成「图像识别 → 判断」两个节点')
       continue
     }
 
     // ---- 情况 B：老的「找图」带 click / on_timeout=exit → 图像识别 +（判断 → 点击 / 终止）----
-    if (oldType === 'find_image') {
+    if (oldType === 'find_image' && (legacy || !!node.data?.stepType) && !params._legacy_expanded) {
       const wantClick = params.click === true
       const wantExit = params.on_timeout === 'exit'
       writeType(node, 'find_image')
-      writeParams(node, upgradeParams('find_image', 'find_image', params, legacy))
+      writeParams(node, { ...upgradeParams('find_image', 'find_image', params, legacy), _legacy_expanded: true })
       out.push(node)
-      if (!wantClick && !wantExit) continue
+      const successors = edges.filter((e) => e.source === node.id).map((e) => ({ ...e }))
 
       const jdId = freshId(`${node.id}-judge`, used)
       const jd = mkNode(
@@ -236,21 +238,24 @@ export function migrateFlow(
       for (const e of edges) {
         if (e.source === node.id) {
           e.source = jdId
-          if (e.sourceHandle === undefined || e.sourceHandle === null) e.sourceHandle = 'yes'
+          if (!e.sourceHandle) e.sourceHandle = 'yes'
         }
       }
       edges.push({ id: `e-${node.id}-${jdId}`, source: node.id, target: jdId })
       out.push(jd)
 
       const branchBits: string[] = []
+      let clickId = '', stopId = ''
       if (wantClick) {
         const msId = freshId(`${node.id}-click`, used)
         const ms = mkNode(
           msId,
           'mouse',
-          { action: 'click', x: '{{found_x}}', y: '{{found_y}}', button: 'left', clicks: 1 },
+          { action: 'click', x: `{{${readParams(node).save_x || 'found_x'}}}`, y: `{{${readParams(node).save_y || 'found_y'}}}`, button: 'left', clicks: 1 },
           { x: pos.x + COL_PITCH_FALLBACK * 2, y: pos.y },
         )
+        ms.data.once = !!(node.data?.once ?? node.once)
+        clickId = msId
         // 「是」分支：判断 → 点击 → 原来的后继
         for (const e of edges) {
           if (e.source === jdId && e.sourceHandle === 'yes') {
@@ -270,10 +275,16 @@ export function migrateFlow(
           { level: 'workflow', message: '未找到图像，按原设置退出' },
           { x: pos.x + COL_PITCH_FALLBACK * 2, y: pos.y + 90 },
         )
+        stopId = tmId
         edges.push({ id: `e-${jdId}-${tmId}`, source: jdId, target: tmId, sourceHandle: 'no' })
         out.push(tm)
         branchBits.push('超时未找到则终止')
+      } else {
+        for (const e of successors) edges.push({ ...e, id: `e-${jdId}-skip-${e.target}`, source: jdId, sourceHandle: 'no' })
       }
+      const recipe = { kind: 'image', judgeId: jdId, clickId, stopId }
+      if (node.data) node.data.simple = recipe
+      else node.simple = recipe
       notes.push(`「图像识别」的旧行为已展开为多个节点（${branchBits.join('、')}）`)
       continue
     }
@@ -299,28 +310,6 @@ export function migrateFlow(
   }
 
   return { nodes: out, edges, notes }
-}
-
-/** 会把输入动作发给系统的节点类型（0.1.4 起输入方式挂在这些节点自己身上）。 */
-const INPUT_TYPES = new Set(['mouse', 'keyboard', 'text_input', 'autoclick', 'record'])
-
-/**
- * 把老的「脚本级输入方式」分发到各个输入节点（0.1.4 起没有全局单选了）。
- *
- * 只在老脚本（version < 3）且当初选的是「模拟输入」时才需要 —— 当初选「键鼠输入」
- * 正好等于新默认值，不用写任何东西。会钻进组合节点。
- */
-function distributeInputMode(nodes: any[] | undefined, mode: string, depth = 0): void {
-  if (!Array.isArray(nodes) || depth > 8) return
-  for (const n of nodes) {
-    const t = readType(n)
-    const p = readParams(n)
-    if (t === GROUP_TYPE) {
-      distributeInputMode(p.nodes, mode, depth + 1)
-      continue
-    }
-    if (INPUT_TYPES.has(t)) p.input_mode = mode
-  }
 }
 
 /**
@@ -352,6 +341,7 @@ function forceGlobalVarScope(nodes: any[] | undefined, depth = 0): number {
 export function migrateScript(data: any): { data: any; notes: string[] } {
   if (!data || typeof data !== 'object') return { data, notes: [] }
   const version = Number(data.version) || 1
+  if(version>6) throw new Error('此工程由较新版本保存，请升级 AutoTool 后打开')
   const legacy = version < 3
   const notes: string[] = []
   const root = migrateFlow(data.nodes, data.edges, legacy)
@@ -371,12 +361,6 @@ export function migrateScript(data: any): { data: any; notes: string[] } {
   }
 
   if (legacy) {
-    const mode = data.input_mode === 'simulated' ? 'simulated' : 'real'
-    if (mode === 'simulated') {
-      distributeInputMode(root.nodes, mode)
-      for (const s of Object.values<any>(scripts)) distributeInputMode(s.nodes, mode)
-      notes.push('脚本级的「模拟输入」已分发到各个输入节点（0.1.4 起输入方式按节点设定）')
-    }
     let kept = 0
     for (const s of Object.values<any>(scripts)) kept += forceGlobalVarScope(s.nodes)
     if (kept) {
@@ -386,8 +370,11 @@ export function migrateScript(data: any): { data: any; notes: string[] } {
     }
   }
 
+  const flat=flattenGraph(root.nodes,root.edges)
+  for(const sub of Object.values<any>(scripts)) if(sub && typeof sub==='object') Object.assign(sub,flattenGraph(sub.nodes || [],sub.edges || []))
+  const clean={...data};delete clean.input_mode
   return {
-    data: { ...data, nodes: root.nodes, edges: root.edges, scripts },
+    data: { ...clean, version:6, ...flat, scripts },
     notes: Array.from(new Set(notes)),
   }
 }

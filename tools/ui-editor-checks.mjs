@@ -10,13 +10,15 @@
  *   3) 顶栏不再有「复制 / 剪切 / 粘贴」；改由**画布右键菜单**唤出
  *      （右键节点 = 三项、右键空白 = 只有粘贴、剪贴板空时粘贴置灰、Esc 可关）
  *   4) 标签能通过"按下-移动-抬起"改变顺序（实现是自己按落点算，不是 HTML5 draggable）
- *   5) 【0.1.4】悬停说明全部去掉（无 .n-tooltip、可见按钮无 title 属性）
+ *   5) 【0.1.6】说明文字全部收进「ⓘ」悬停：面板里没有 .terminate-hint / .schema-help 灰字段落
  *   6) 【0.1.4】顶栏不再有「输入方式」单选；输入方式下移到各输入节点的参数里
- *   7) 【0.1.4】右侧面板「参数 / 变量」两个标签页；变量按容器分（全局 vs 局部）
+ *   7) 【0.1.7】右侧是**一个侧栏外壳**，顶部标签切换「参数 / 变量」：
+ *      参数跟着选择自动开合（没选中就不可用），变量由顶栏「🏷 变量」按钮点亮
  *   8) 【0.1.4】组合节点：渲染 / 单击改属性 / 双击进新标签编辑 / 局部变量隔离
  *   9) 【0.1.4】「📦 合并节点」能把选中的一串相邻节点收成一个组合节点
- *  10) 【0.1.5】输出变量是"节点声明能力、用户添加"：新节点不自带变量，
- *      「变量」页有「节点输出」区块，点添加才建变量
+ *  10) 【0.1.7】变量分「自定义变量 / 流程变量」；流程变量在**参数面板**里选/建，
+ *      默认名 = 节点 key + 节点编号 _ 变量类型 + 输出编号（全英文，例 image_f1_found）；
+ *      选择器把**相邻节点的变量**置顶，「新建」时优先复用它
  *  11) 【0.1.5】「保存」不再弹路径（第一次 / 另存为 / 句柄失效才弹）；
  *      用 stub 版 showSaveFilePicker 数调用次数来验证
  *
@@ -200,8 +202,9 @@ async function dragTo(fromIdx, toIdx, expect, after = false) {
 const HELPERS14 = `
   const activeEditor = () => Array.from(document.querySelectorAll('.editor')).filter(e => e.offsetParent !== null)[0];
   const fileInput = () => { const e = activeEditor(); return e ? e.querySelector('.topbar input[type=file]') : null; };
-  const inspTabs = () => visAll('.insp-tab');
-  const inspText = () => { const e = visAll('.inspector')[0]; return e ? e.textContent.replace(/\\s+/g,' ').trim() : ''; };
+  const paramsPane = () => visAll('.params-pane')[0];
+  const varsPane = () => visAll('.vars-pane')[0];
+  const inspText = (sel) => { const e = visAll(sel || '.params-pane')[0]; return e ? e.textContent.replace(/\\s+/g,' ').trim() : ''; };
   const nodeEls = () => visAll('.vue-flow__node');
   const groupNodes = () => visAll('.step-node.is-group');
 `
@@ -290,14 +293,38 @@ const nodeIndexOf = (sel) =>
       return wrap ? nodeEls().indexOf(wrap) : -1; })()`,
   )
 
-/** 点右侧面板的「参数」/「变量」分页 */
-async function clickInspTab(label) {
+/** 点顶栏「🏷 变量」开关（开 / 关都由它切） */
+async function toggleVars() {
   return js(
     `(() => { ${HELPERS} ${HELPERS14}
-      const t = inspTabs().find(b => b.textContent.trim() === ${JSON.stringify(label)});
-      if (!t) return false; t.click(); return true; })()`,
+      const b = visAll('.vars-toggle')[0];
+      if (!b) return false; b.click(); return true; })()`,
   )
 }
+
+/** 确保变量侧栏是打开的（已经开着就不动） */
+async function openVars() {
+  const open = await js(`(() => { ${HELPERS} ${HELPERS14} return !!varsPane(); })()`)
+  if (!open) await toggleVars()
+  await sleep(300)
+  return open
+}
+
+/** 点侧栏顶部的某个标签（参数 / 变量）。两者共用一个外壳，靠它切换。 */
+async function clickInspTab(name) {
+  const ok = await js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const b = visAll('.insp-tab, .sidebar-tabs button').find(x => x.textContent.replace(/\\s+/g,'').includes(${JSON.stringify(name)}));
+      if (!b) return false; b.click(); return true; })()`,
+  )
+  await sleep(300)
+  return ok
+}
+
+/** 切到「参数」标签（读参数面板 / 点「新建」前用） */
+const showParams = () => clickInspTab('参数')
+/** 切到「变量」标签（读变量表前用） */
+const showVars = () => clickInspTab('变量')
 
 /** 点可见的某个按钮（按文本包含匹配），用于工具栏按钮、属性面板按钮 */
 async function clickButton(text) {
@@ -321,6 +348,8 @@ const snapshot14 = () =>
       const barTitledOwn = barTitled.filter(el => !el.closest('.n-base-selection, .n-select'));
       return {
         tooltipNodes: document.querySelectorAll('.n-tooltip').length,
+        hintIcons: visAll('.hint-i').length,
+        descBlocks: visAll('.terminate-hint, .schema-help').length,
         titledInBar: barTitled.length,
         titledOutsideSelect: barTitledOwn.length,
         titledDetail: barTitledOwn.slice(0, 5).map(el => el.tagName + '[' + el.getAttribute('title') + ']'),
@@ -328,7 +357,11 @@ const snapshot14 = () =>
         barText: sb ? sb.textContent.replace(/\\s+/g,' ').trim() : '',
         barRadios: sb ? sb.querySelectorAll('.n-radio').length : -1,
         btnText,
-        inspTabs: inspTabs().map(b => b.textContent.trim()),
+        paramsOpen: !!paramsPane(),
+        varsOpen: !!varsPane(),
+        inspShells: visAll('.insp-shell').length,
+        inspTabs: visAll('.insp-tab').length,
+        activeTab: ((visAll('.insp-tab.on')[0] || {}).textContent || '').trim(),
         groupCount: groupNodes().length,
         groupTitles: groupNodes().map(g => (g.querySelector('.step-title') || {}).textContent.replace(/\\s+/g,' ').trim()),
         groupSummaries: groupNodes().map(g => (g.querySelector('.step-summary') || {}).textContent.trim()),
@@ -337,19 +370,19 @@ const snapshot14 = () =>
     })()`,
   )
 
-/** 右侧面板当前这一页里的字段标签 */
+/** 参数侧栏当前这一页里的字段标签 */
 const inspectorLabels = () =>
   js(
     `(() => { ${HELPERS} ${HELPERS14}
-      const e = visAll('.inspector')[0]; if (!e) return [];
+      const e = paramsPane(); if (!e) return [];
       return Array.from(e.querySelectorAll('label')).map(l => l.textContent.trim()); })()`,
   )
 
-/** 右侧面板里某个 label 对应控件的当前值（select / input 都尽量读出来） */
+/** 参数侧栏里某个 label 对应控件的当前值（select / input 都尽量读出来） */
 const inspectorValue = (labelText) =>
   js(
     `(() => { ${HELPERS} ${HELPERS14}
-      const e = visAll('.inspector')[0]; if (!e) return null;
+      const e = paramsPane(); if (!e) return null;
       const lab = Array.from(e.querySelectorAll('label')).find(l => l.textContent.trim() === ${JSON.stringify(labelText)});
       if (!lab) return null;
       const field = lab.closest('.field'); if (!field) return null;
@@ -358,12 +391,22 @@ const inspectorValue = (labelText) =>
   )
 
 const varRows = () =>
-  js(`(() => { ${HELPERS} ${HELPERS14} return visAll('.var-row').length; })()`)
+  js(`(() => { ${HELPERS} ${HELPERS14} const e = varsPane(); return e ? e.querySelectorAll('.var-group .var-row').length : 0; })()`)
 
 const varNames = () =>
   js(
     `(() => { ${HELPERS} ${HELPERS14}
-      return visAll('.var-row').map(r => { const i = r.querySelector('input'); return i ? i.value : ''; }); })()`,
+      const e = varsPane(); if (!e) return [];
+      return Array.from(e.querySelectorAll('.var-group .var-row')).map(r => { const i = r.querySelector('input'); return i ? i.value : ''; }); })()`,
+  )
+
+/** 变量侧栏里某一组（custom / flow）的变量名 */
+const groupVarNames = (which) =>
+  js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const e = varsPane(); if (!e) return [];
+      const g = e.querySelector('.var-group.' + ${JSON.stringify(which)}); if (!g) return [];
+      return Array.from(g.querySelectorAll('.var-row')).map(r => { const i = r.querySelector('input'); return i ? i.value : ''; }); })()`,
   )
 
 /** 排空消息条（naive-ui 的 .n-message 是全局浮层，读文本判断是否弹了提示） */
@@ -466,20 +509,24 @@ const nodeIndexByTitle = (title) =>
       return nodeEls().findIndex(e => { const el = e.querySelector('.step-title'); return !!el && el.textContent.trim() === t; }); })()`,
   )
 
-/** 「节点输出」区块里列出的属性名 */
+/** 参数面板「输出变量」区块里列出的属性名 */
 const outLabels = () =>
   js(
     `(() => { ${HELPERS} ${HELPERS14}
-      return visAll('.out-row').map(r => ((r.querySelector('.out-label') || {}).textContent || '').trim()); })()`,
+      const e = paramsPane(); if (!e) return [];
+      return Array.from(e.querySelectorAll('.out-field label')).map(l => l.textContent.trim()); })()`,
   )
 
-/** 点「节点输出」里某一项的「＋ 添加」 */
+/** 点「输出变量」里某一项的「新建」（按默认规则建流程变量） */
 const clickOutAdd = (label) =>
   js(
     `(() => { ${HELPERS} ${HELPERS14}
-      const row = visAll('.out-row').find(r => ((r.querySelector('.out-label') || {}).textContent || '').trim() === ${JSON.stringify(label)});
-      if (!row) return false;
-      const b = Array.from(row.querySelectorAll('button')).find(x => x.textContent.includes('添加'));
+      const e = paramsPane(); if (!e) return false;
+      const field = Array.from(e.querySelectorAll('.out-field')).find(f => {
+        const l = f.querySelector('label'); return !!l && l.textContent.trim() === ${JSON.stringify(label)};
+      });
+      if (!field) return false;
+      const b = Array.from(field.querySelectorAll('button')).find(x => x.textContent.includes('新建'));
       if (!b) return false; b.click(); return true; })()`,
   )
 
@@ -653,16 +700,26 @@ async function main() {
   // ==========================================================================
   const s14 = await snapshot14()
 
-  // ---------- ① 悬停说明全部去掉 ----------
+  // ---------- ① 说明文字 → 「ⓘ」悬停 ----------
   check(
-    '页面上没有任何悬停提示气泡（.n-tooltip）',
+    '面板里不再铺说明文字（无 .terminate-hint / .schema-help）',
+    s14.descBlocks === 0,
+    '说明段落 = ' + s14.descBlocks,
+  )
+  check(
+    '说明改用「ⓘ」图标（页面上有 .hint-i）',
+    s14.hintIcons > 0,
+    '图标数 = ' + s14.hintIcons,
+  )
+  check(
+    '默认没有任何气泡挂在页面上（悬停才出现）',
     s14.tooltipNodes === 0,
     '数量 = ' + s14.tooltipNodes,
   )
   check(
     '设置条 / 可见按钮上都没有我们自己加的 title 悬停说明',
-    s14.tooltipNodes === 0 && s14.titledOutsideSelect === 0 && s14.titledButtons === 0,
-    `tooltip=${s14.tooltipNodes} 按钮=${s14.titledButtons} 设置条自有=${s14.titledOutsideSelect}` +
+    s14.titledOutsideSelect === 0 && s14.titledButtons === 0,
+    `按钮=${s14.titledButtons} 设置条自有=${s14.titledOutsideSelect}` +
       (s14.titledDetail.length ? ' ' + JSON.stringify(s14.titledDetail) : '') +
       `（select 内部 ${s14.titledInBar - s14.titledOutsideSelect} 个不算）`,
   )
@@ -681,11 +738,21 @@ async function main() {
     JSON.stringify(s14.btnText.filter((t) => /拆分|合并|录制/.test(t))),
   )
 
-  // ---------- ③ 右侧面板「参数 / 变量」分页 ----------
+  // ---------- ③ 右侧是一个侧栏外壳，参数 / 变量是它的两个标签页 ----------
   check(
-    '右侧面板有「参数 / 变量」两个标签页',
-    s14.inspTabs.join(',') === '参数,变量',
-    JSON.stringify(s14.inspTabs),
+    '未选中节点时侧栏整体不出现',
+    s14.paramsOpen === false && s14.inspShells === 0,
+    `参数侧栏 = ${s14.paramsOpen}，外壳数 = ${s14.inspShells}`,
+  )
+  check(
+    '变量标签默认没被点亮',
+    s14.varsOpen === false && s14.inspShells === 0,
+    `变量侧栏 = ${s14.varsOpen}，外壳数 = ${s14.inspShells}`,
+  )
+  check(
+    '工具栏在「合并节点」后面有「🏷 变量」按钮',
+    s14.btnText.some((t) => t.includes('变量')),
+    JSON.stringify(s14.btnText.filter((t) => /变量|合并|拆分/.test(t))),
   )
 
   // ---------- ④ 加载一份含组合节点的脚本 ----------
@@ -720,6 +787,14 @@ async function main() {
   )
   const grpNameVal = await inspectorValue('名称')
   check('组合节点名称在面板里可读可改', grpNameVal === '我的组合', '值 = ' + JSON.stringify(grpNameVal))
+  const afterSel = await snapshot14()
+  check('选中节点后参数侧栏自动出现', afterSel.paramsOpen === true)
+  check(
+    '参数使用一个右侧外壳，变量独立放在左侧',
+    afterSel.inspShells === 1 && afterSel.inspTabs === 1,
+    `外壳 = ${afterSel.inspShells}，标签 = ${afterSel.inspTabs}`,
+  )
+  check('选中节点时前台是「参数」标签', afterSel.activeTab === '参数', '当前标签 = ' + JSON.stringify(afterSel.activeTab))
 
   // ---------- ⑥ 单击输入节点：输入方式已下移到节点参数 ----------
   await nodeClick(mouseIdx, false)
@@ -733,14 +808,50 @@ async function main() {
     '当前值 = ' + JSON.stringify(modeVal),
   )
 
-  // ---------- ⑦ 变量分页：根脚本看到的是全局变量 ----------
-  await clickInspTab('变量')
+  // 点画布空白处 → 没选中了，参数侧栏应自动收起
+  // 必须走完整的 mousedown → mouseup → click（Vue Flow 的 pane 点击是从这套事件里判定的，
+  // 直接 el.click() 只会派发一个 click，它不认）
+  await js(`(() => { ${HELPERS} ${HELPERS14}
+    const pane = visAll('.vue-flow__pane')[0]; if (!pane) return false;
+    const b = pane.getBoundingClientRect();
+    const cx = b.x + 12, cy = b.y + b.height - 12;
+    const mk = (type, buttons) => new MouseEvent(type, { bubbles: true, cancelable: true, composed: true,
+      view: window, clientX: cx, clientY: cy, button: 0, buttons });
+    pane.dispatchEvent(mk('mousedown', 1));
+    pane.dispatchEvent(mk('mouseup', 0));
+    pane.dispatchEvent(mk('click', 0));
+    return true; })()`)
+  await sleep(450)
+  const paneDiag = await js(`(() => { ${HELPERS} ${HELPERS14}
+    const panes = visAll('.vue-flow__pane');
+    return {
+      panes: panes.length,
+      cls: panes.map(p => p.className),
+      paramsNow: visAll('.params-pane').length,
+      editors: Array.from(document.querySelectorAll('.editor')).map(e => ({ vis: e.offsetParent !== null, tabs: e.querySelectorAll('.vue-flow__pane').length })),
+    }; })()`)
+  check('点画布空白处，参数侧栏自动收起', (await snapshot14()).paramsOpen === false, JSON.stringify(paneDiag))
+  await nodeClick(mouseIdx, false)
   await sleep(350)
-  check('切到「变量」分页能管理变量', (await varRows()) === 1, '行数 = ' + (await varRows()))
+
+  // ---------- ⑦ 变量侧栏：根脚本看到的是全局变量 ----------
+  await openVars()
+  check('顶栏「🏷 变量」能打开变量侧栏', (await snapshot14()).varsOpen === true)
+  check('变量侧栏标明这一层是「全局变量」', /全局变量/.test(await js(`(() => { ${HELPERS} ${HELPERS14} return inspText('.vars-pane'); })()`)))
   check('根脚本这一层列出的是全局变量 g1', (await varNames()).join(',') === 'g1', JSON.stringify(await varNames()))
-  await clickButton('新增变量')
+  check('g1 落在「自定义变量」组里', (await groupVarNames('custom')).join(',') === 'g1', JSON.stringify(await groupVarNames('custom')))
+
+  await js(`(() => { ${HELPERS} ${HELPERS14}
+    const b = visAll('.add-custom-var')[0]; if (!b) return false; b.click(); return true; })()`)
   await sleep(300)
-  check('「＋ 新增变量」能加一行', (await varRows()) === 2, '行数 = ' + (await varRows()))
+  check('「＋ 新增」能给自定义变量加一行', (await varRows()) === 2, '行数 = ' + (await varRows()))
+
+  // 再点一次开关 → 收起
+  await toggleVars()
+  await sleep(300)
+  check('再点「🏷 变量」能收起变量侧栏', (await snapshot14()).varsOpen === false)
+  await toggleVars()
+  await sleep(300)
 
   // ---------- ⑧ 双击组合节点 → 新标签里编辑它内部那张图 ----------
   await nodeDblClick(grpIdx)
@@ -754,14 +865,13 @@ async function main() {
   const grpIcon = await js(
     `(() => { ${HELPERS}
       const t = visAll('.tab').find(x => x.querySelector('.tab-name').textContent.trim() === '我的组合');
-      return t ? (t.querySelector('.tab-icon') || {}).textContent : null; })()`,
+      return !!t?.querySelector('.tab-icon svg.lucide'); })()`,
   )
-  check('组合节点标签用 🧩 图标', grpIcon === '🧩', '图标 = ' + JSON.stringify(grpIcon))
+  check('组合节点标签用 Lucide 图标', grpIcon === true, '已渲染 SVG = ' + grpIcon)
   check('组合节点标签里能看到它内部的 2 个节点', (await js(`(() => { ${HELPERS} ${HELPERS14} return nodeEls().length; })()`)) === 2)
 
   // ---------- ⑨ 组合节点里的变量是"局部变量"，与全局隔离 ----------
-  await clickInspTab('变量')
-  await sleep(350)
+  await openVars()
   const innerVars = await varNames()
   check(
     '组合节点编辑页里管理的是它自己的局部变量',
@@ -769,9 +879,9 @@ async function main() {
     JSON.stringify(innerVars),
   )
   const scopeText = await js(
-    `(() => { ${HELPERS} ${HELPERS14} return inspText(); })()`,
+    `(() => { ${HELPERS} ${HELPERS14} return inspText('.vars-pane'); })()`,
   )
-  check('局部变量页明确写了"局部变量"', /局部变量/.test(scopeText), scopeText.slice(0, 60))
+  check('局部变量侧栏明确写了"局部变量"', /局部变量/.test(scopeText), scopeText.slice(0, 60))
 
   // 切回「GRP」这个根脚本标签 → 变量页仍是全局那些
   // （注意不能点第 0 个标签：此刻标签是 [BBB, AAA, CCC, GRP, 我的组合]，第 0 个是 BBB 那个空脚本）
@@ -782,8 +892,7 @@ async function main() {
       if (!t) return false; t.click(); return true; })()`,
   )
   await sleep(700)
-  await clickInspTab('变量')
-  await sleep(350)
+  await openVars()
   const rootVars = await varNames()
   check(
     '根脚本与组合节点的变量互不干扰（全局 g1 / 局部 inner1）',
@@ -799,7 +908,6 @@ async function main() {
       if (!t) return false; t.click(); return true; })()`,
   )
   await sleep(800)
-  await clickInspTab('参数')
   await nodeClick(0, false)
   await sleep(300)
   await nodeClick(1, true)
@@ -833,58 +941,93 @@ async function main() {
   const nested = await js(`(() => { ${HELPERS} ${HELPERS14} return nodeEls().length; })()`)
   check('合并出来的组合节点可以双击进去，看到被收进去的 2 个节点', nested === 2, '内部节点数 = ' + nested)
 
-  // ---------- ⑪ 输出变量：节点只"声明能力"，由用户添加（0.1.5）----------
+  // ---------- ⑪ 流程变量：在参数面板里选/建 ----------
   await clickInPage('.tab-add')
   await sleep(700)
   await loadScript(make15Script('OUT'), 'out.agflow')
   await sleep(1500)
 
-  await clickInspTab('变量')
-  await sleep(350)
-  const noSelText = await js(`(() => { ${HELPERS} ${HELPERS14} return inspText(); })()`)
-  check(
-    '没选中节点时，变量页提示"先选中一个节点"',
-    /选中一个节点/.test(noSelText),
-    noSelText.slice(0, 90),
-  )
+  await openVars()
   check(
     '新脚本的变量表是空的（节点不带自建变量）',
     (await varRows()) === 0,
     '行数 = ' + (await varRows()),
   )
+  check('空变量表时参数标签不可用（没选中节点）', (await snapshot14()).paramsOpen === false)
 
   const fiIdx2 = await nodeIndexByTitle('图像识别')
   await nodeClick(fiIdx2, false)
   await sleep(450)
+  await showParams()
   const outs = await outLabels()
   check(
-    '选中「图像识别」后列出它的输出变量属性（4 项）',
-    outs.length === 4 && outs.includes('是否找到') && outs.includes('匹配中心 X'),
+    '选中「图像识别」后，参数面板里列出它的输出（含一个坐标组合）',
+    outs.length === 5 && outs.includes('是否找到') && outs.includes('匹配中心坐标'),
     JSON.stringify(outs),
   )
+  await showVars()
   check(
-    '这些输出还**没有**变成变量（不添加就不产生）',
+    '这些输出还**没有**变成变量（不选就不产生）',
     (await varRows()) === 0,
     '行数 = ' + (await varRows()),
   )
 
+  await showParams()
   await clickOutAdd('是否找到')
-  await sleep(400)
+  await sleep(450)
+  await showVars()
   const namesAfterAdd = await varNames()
+  // 默认名 = 节点 key + 节点编号 _ 变量类型 + 输出编号（第 1 个节点 find_image，第 1 个输出，auto → 全英文）
   check(
-    '点「＋ 添加」后变量表里出现它（found）',
-    namesAfterAdd.length === 1 && namesAfterAdd[0] === 'found',
+    '点「新建」按默认规则建流程变量（image_f1_found）',
+    namesAfterAdd.length === 1 && namesAfterAdd[0] === 'image_f1_found',
     JSON.stringify(namesAfterAdd),
   )
-  const addedMsg = (await messages()).join(' | ')
-  check('添加后有提示', /已添加变量/.test(addedMsg), addedMsg)
-
-  // 再点一次同一个属性（此时按钮已变成变量名）→ 不重复添加
-  await clickOutAdd('是否找到')
-  await sleep(350)
   check(
-    '重复点已添加的属性不会重复建变量',
-    (await varRows()) === 1,
+    '流程变量默认名是纯英文（不含中文）',
+    namesAfterAdd.every((n) => !/[\u4e00-\u9fa5]/.test(n)),
+    JSON.stringify(namesAfterAdd),
+  )
+  check(
+    '新建的变量落在「流程变量」组里',
+    (await groupVarNames('flow')).join(',') === 'image_f1_found',
+    JSON.stringify(await groupVarNames('flow')),
+  )
+  const addedMsg = (await messages()).join(' | ')
+  check('创建流程变量后有提示', /已创建流程变量/.test(addedMsg), addedMsg)
+
+  // 已绑定的输出：按钮变成「取消」（不可能重复建）
+  await showParams()
+  const outBtnText = await js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const e = paramsPane(); if (!e) return null;
+      const f = Array.from(e.querySelectorAll('.out-field')).find(x => {
+        const l = x.querySelector('label'); return !!l && l.textContent.trim() === '是否找到';
+      });
+      if (!f) return null;
+      const bs = Array.from(f.querySelectorAll('button')).map(b => b.textContent.replace(/\\s+/g,'').trim());
+      return bs.join('|'); })()`,
+  )
+  check('已绑定的输出按钮变成「取消」', outBtnText === '取消', String(outBtnText))
+  await showVars()
+  check('变量表仍然是 1 行', (await varRows()) === 1, '行数 = ' + (await varRows()))
+
+  // 点「取消」→ 节点绑定与流程变量一起消失
+  await showParams()
+  await js(
+    `(() => { ${HELPERS} ${HELPERS14}
+      const e = paramsPane(); if (!e) return false;
+      const f = Array.from(e.querySelectorAll('.out-field')).find(x => {
+        const l = x.querySelector('label'); return !!l && l.textContent.trim() === '是否找到';
+      });
+      const b = f && Array.from(f.querySelectorAll('button')).find(x => x.textContent.includes('取消'));
+      if (!b) return false; b.click(); return true; })()`,
+  )
+  await sleep(450)
+  await showVars()
+  check(
+    '点「取消」后流程变量一起消失',
+    (await varRows()) === 0,
     '行数 = ' + (await varRows()),
   )
 
@@ -892,11 +1035,46 @@ async function main() {
   const calcIdx = await nodeIndexByTitle('运算')
   await nodeClick(calcIdx, false)
   await sleep(450)
+  await showParams()
   const outs2 = await outLabels()
   check(
     '切到「运算」节点后输出属性跟着换',
     outs2.length === 1 && outs2[0] === '运算结果',
     JSON.stringify(outs2),
+  )
+
+  // ---------- ⑪-b 相邻变量：新建时优先复用（0.1.7）----------
+  // 「图像识别」→「运算」之间有一条连线，属于相邻节点；先给上游建一条 auto 变量
+  await nodeClick(fiIdx2, false)
+  await sleep(450)
+  await showParams()
+  await clickOutAdd('是否找到')
+  await sleep(500)
+  await showVars()
+  check(
+    '先给上游节点建一条流程变量',
+    (await varNames()).join(',') === 'image_f1_found',
+    JSON.stringify(await varNames()),
+  )
+
+  // 下游节点的 number 输出 → auto 兼容，应当直接复用而不是新建
+  await nodeClick(calcIdx, false)
+  await sleep(450)
+  await showParams()
+  await clickOutAdd('运算结果')
+  await sleep(500)
+  await showVars()
+  const afterReuse = await varNames()
+  check(
+    '相邻节点已有兼容变量时，「新建」直接复用它（不重复建）',
+    afterReuse.join(',') === 'image_f1_found',
+    JSON.stringify(afterReuse),
+  )
+  const reuseMsg = (await messages()).join(' | ')
+  check(
+    '复用提示写明了来源（已复用相邻变量 + 变量名）',
+    /已复用相邻变量/.test(reuseMsg) && /image_f1_found/.test(reuseMsg),
+    reuseMsg,
   )
 
   // ---------- ⑫ 「保存」不再弹路径，「另存为」才弹（0.1.5）----------
@@ -925,7 +1103,7 @@ async function main() {
   )
   check('顶栏有「保存」和「另存为」两个按钮', /保存/.test(saveBtnText) && /另存为/.test(saveBtnText), saveBtnText)
 
-  await clickTopbar('💾保存')
+  await clickTopbar('保存')
   await sleep(700)
   let pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
   const firstMsg = (await messages()).join(' | ')
@@ -937,7 +1115,7 @@ async function main() {
   check('保存后提示里写出了文件名', /已保存到/.test(firstMsg), firstMsg)
 
   await clearMessages()
-  await clickTopbar('💾保存')
+  await clickTopbar('保存')
   await sleep(700)
   pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
   check(
@@ -947,7 +1125,7 @@ async function main() {
   )
 
   await clearMessages()
-  await clickTopbar('📄另存为')
+  await clickTopbar('另存为')
   await sleep(700)
   pickStat = await js(`({ picked: window.__picked, writes: window.__writes.length })`)
   check(

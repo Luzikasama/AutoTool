@@ -27,7 +27,7 @@ const point = ref<{ x: number; y: number } | null>(null)
 const error = ref('')
 
 const winOptions = computed(() => [
-  { label: '🖥 全屏', value: 0 },
+  { label: '全屏', value: 0 },
   ...windows.value.map((w) => ({ label: w.title.slice(0, 40), value: w.hwnd })),
 ])
 

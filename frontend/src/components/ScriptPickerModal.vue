@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppIcon from './AppIcon.vue'
 /**
  * 「调用脚本」节点的子脚本挑选面板。
  *
@@ -40,7 +41,7 @@ function pick(id: string) {
 
     <div v-if="scripts.length" class="list">
       <div v-for="s in scripts" :key="s.id" class="row" :class="{ active: s.id === current }">
-        <span class="icon">📦</span>
+        <span class="icon"><AppIcon name="package" /></span>
         <span class="name">{{ s.name }}</span>
         <span class="sid">{{ s.id }}</span>
         <n-button size="tiny" quaternary @click="emit('open', s.id)">编辑</n-button>
@@ -52,8 +53,8 @@ function pick(id: string) {
     <p v-else class="hint">本脚本里还没有子脚本，可以直接新建一个，或从文件导入。</p>
 
     <div class="actions">
-      <n-button size="small" @click="emit('create')">＋ 新建空白子脚本</n-button>
-      <n-button size="small" @click="emit('import')">📂 从文件导入…</n-button>
+      <n-button size="small" @click="emit('create')"><AppIcon name="plus" /> 新建空白子脚本</n-button>
+      <n-button size="small" @click="emit('import')"><AppIcon name="folder-open" /> 从文件导入…</n-button>
       <div class="spacer" />
       <n-button size="small" @click="show = false">取消</n-button>
     </div>

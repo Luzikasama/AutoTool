@@ -113,6 +113,7 @@ const MOUSE_ACTIONS = [
   { label: '右键单击', value: 'right_click' },
   { label: '中键单击', value: 'middle_click' },
   { label: '移动到坐标', value: 'move' },
+  { label: '按住后松开', value: 'hold' },
   { label: '按下不放', value: 'down' },
   { label: '松开', value: 'up' },
   { label: '滚轮', value: 'wheel' },
@@ -122,17 +123,6 @@ const BUTTONS = [
   { label: '左键', value: 'left' },
   { label: '右键', value: 'right' },
   { label: '中键', value: 'middle' },
-]
-
-/**
- * 输入方式（0.1.4 起**挂在每个输入节点上**，不再是设置栏里的全局单选）。
- *
- * 为什么要挪到节点上：一次流程里常常"大部分动作要真实键鼠、只有某几步要走后台消息"
- * （比如那条消息是发给一个不该被抢焦点的窗口），全局二选一表达不了。
- */
-const INPUT_MODES = [
-  { label: '真实键鼠（占用鼠标键盘，最通用）', value: 'real' },
-  { label: '后台消息（不占用键鼠，需已绑定窗口）', value: 'simulated' },
 ]
 
 const TIMEOUT_ON = [
@@ -149,18 +139,24 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
   // =====================================================================
   // ① 输入
   // =====================================================================
+  parallel: {help:'各出口同时执行，汇合后继续。主轴仅决定显示顺序。',fields:[]},
+  join: {help:'等待配对分叉的所有已启动路径完成，再执行后续节点。',fields:[]},
+  scope: {help:'保留本区域局部变量，在同一画布编辑内部流程。',fields:[]},
   mouse: {
     help: '在指定坐标执行一次鼠标动作。坐标是屏幕绝对坐标，可用「拾取坐标」抓取。',
     fields: [
       { key: 'action', label: '动作', type: 'select', options: MOUSE_ACTIONS, default: 'click' },
+      { key: 'point_var', label: '目标坐标变量', type: 'text', default: '', placeholder: '选择坐标变量，或留空填写 X / Y', hint: '坐标变量同时包含 X 与 Y；识别失败时不会点击旧坐标。连接找图节点时可自动绑定。' },
       { key: 'x', label: 'X 坐标', type: 'number', default: 0, min: -100000, max: 100000 },
       { key: 'y', label: 'Y 坐标', type: 'number', default: 0, min: -100000, max: 100000 },
-      { key: 'button', label: '按键', type: 'select', options: BUTTONS, default: 'left', showIf: { key: 'action', in: ['down', 'up'] } },
+      { key: 'button', label: '按键', type: 'select', options: BUTTONS, default: 'left', showIf: { key: 'action', in: ['down', 'up', 'hold'] } },
+      { key: 'hold_ms', label: '按住时长', type: 'number', default: 60, min: 0, max: 86400000, showIf: { key: 'action', equals: 'hold' } },
+      { key: 'end_x', label: '松开 X（可选）', type: 'text', default: '', showIf: { key: 'action', equals: 'hold' } },
+      { key: 'end_y', label: '松开 Y（可选）', type: 'text', default: '', showIf: { key: 'action', equals: 'hold' } },
       { key: 'clicks', label: '连击次数', type: 'number', default: 1, min: 1, max: 10, hint: '仅「单击」时生效；双击请直接用「双击」动作', showIf: { key: 'action', equals: 'click' } },
       { key: 'dx', label: '水平滚动', type: 'number', default: 0, hint: '正数向右', showIf: { key: 'action', equals: 'wheel' } },
       { key: 'dy', label: '垂直滚动', type: 'number', default: -3, hint: '正数向上、负数向下（一格 = 120）', showIf: { key: 'action', equals: 'wheel' } },
-      { key: 'duration_ms', label: '移动耗时', type: 'number', default: 0, min: 0, max: 60000, hint: '仅「移动到坐标」时生效，0 表示瞬移', showIf: { key: 'action', equals: 'move' } },
-      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
+      { key: 'duration_ms', label: '移动耗时', type: 'number', default: 0, min: 0, max: 86400000, hint: '仅「移动到坐标」时生效，0 表示瞬移', showIf: { key: 'action', equals: 'move' } },
     ],
   },
 
@@ -173,8 +169,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
         { label: '松开', value: 'up' },
       ] },
       { key: 'keys', label: '按键', type: 'keys', default: 'enter', hint: '点击输入框后直接按下组合键即可录入' },
-      { key: 'hold_ms', label: '按住时长', type: 'number', default: 30, min: 0, max: 60000, hint: '仅「按一下」时生效', showIf: { key: 'action', equals: 'press' } },
-      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
+      { key: 'hold_ms', label: '按住时长', type: 'number', default: 30, min: 0, max: 86400000, hint: '仅「按一下」时生效', showIf: { key: 'action', equals: 'press' } },
     ],
   },
 
@@ -188,7 +183,6 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       ] },
       { key: 'interval_ms', label: '字符间隔', type: 'number', default: 10, min: 0, max: 1000, hint: '仅「直接输入」时生效', showIf: { key: 'method', equals: 'direct' } },
       { key: 'restore_clipboard', label: '粘贴后恢复原剪贴板', type: 'switch', default: true, showIf: { key: 'method', equals: 'clipboard' } },
-      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -232,7 +226,8 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
     ],
     outputs: [
       { param: 'save_found', label: '是否找到', suggest: 'found', type: 'auto', hint: 'yes / no，可直接给「判断」节点用' },
-      { param: 'save_x', label: '匹配中心 X', suggest: 'found_x', type: 'number' },
+      { param: 'save_point', label: '匹配中心坐标', suggest: 'point', type: 'point', hint: '包含 X 与 Y 的一个坐标变量，供后续鼠标节点直接使用' },
+      { param: 'save_x', label: '匹配中心 X（兼容）', suggest: 'found_x', type: 'number' },
       { param: 'save_y', label: '匹配中心 Y', suggest: 'found_y', type: 'number' },
       { param: 'save_score', label: '相似度', suggest: 'found_score', type: 'number', hint: '0~1 之间的小数' },
     ],
@@ -276,7 +271,8 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
     ],
     outputs: [
       { param: 'save_found', label: '是否出现', suggest: 'color_found', type: 'auto', hint: 'yes / no' },
-      { param: 'save_x', label: '命中点 X', suggest: 'color_x', type: 'number' },
+      { param: 'save_point', label: '命中坐标', suggest: 'point', type: 'point' },
+      { param: 'save_x', label: '命中点 X（兼容）', suggest: 'color_x', type: 'number' },
       { param: 'save_y', label: '命中点 Y', suggest: 'color_y', type: 'number' },
     ],
   },
@@ -409,23 +405,22 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
   // ④ 工具
   // =====================================================================
   record: {
-    help: '一段录制的键鼠操作，可按速度整体回放。用「✂ 拆分节点」可摊成普通节点继续编辑。',
+    help: '一段录制的键鼠操作，可按速度整体回放。用「拆分节点」可继续编辑流程与时间关系。',
     fields: [
       { key: 'speed', label: '回放速度', type: 'number', default: 1, min: 0.1, max: 10, step: 0.1, hint: '2 表示两倍速' },
       { key: 'repeat', label: '重复次数', type: 'number', default: 1, min: 1, max: 1000 },
-      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '回放整段录制时统一使用；后台消息需要先绑定目标窗口' },
     ],
   },
 
   autoclick: {
     help: '在固定坐标按指定节奏连点 N 次。整个过程可暂停、可停止。',
     fields: [
+      { key: 'point_var', label: '目标坐标变量', type: 'text', default: '', hint: '一个坐标变量同时提供 X 与 Y；留空使用手动坐标' },
       { key: 'x', label: 'X 坐标', type: 'number', default: 0, min: -100000, max: 100000 },
       { key: 'y', label: 'Y 坐标', type: 'number', default: 0, min: -100000, max: 100000 },
       { key: 'button', label: '按键', type: 'select', options: BUTTONS, default: 'left' },
       { key: 'count', label: '点击次数', type: 'number', default: 10, min: 1, max: 100000 },
       { key: 'interval_ms', label: '点击间隔', type: 'number', default: 100, min: 0, max: 600000, hint: '毫秒，两次点击之间' },
-      { key: 'input_mode', label: '输入方式', type: 'select', options: INPUT_MODES, default: 'real', hint: '后台消息需要先绑定目标窗口' },
     ],
   },
 
@@ -477,6 +472,7 @@ export const NODE_SCHEMA: Record<NodeType, NodeSchema> = {
       { key: 'name', label: '变量名', type: 'text', default: 'my_var' },
       { key: 'value', label: '值', type: 'textarea', default: '', placeholder: '支持 {{其他变量}}；纯数字会自动识别为数字', showIf: { key: 'action', equals: 'set' } },
       { key: 'var_type', label: '类型', type: 'select', default: 'auto', options: [
+        { label: '坐标 (X, Y)', value: 'point' },
         { label: '自动识别', value: 'auto' },
         { label: '文本', value: 'string' },
         { label: '数字', value: 'number' },
@@ -676,14 +672,6 @@ export function fieldVisible(f: NodeField, params: Record<string, any>): boolean
   return true
 }
 
-/** 该节点的全部字段 key（含隐藏的）——迁移补参、默认值合并用。
- *  输出变量属性也一并算进来：它们在参数里同样是一个键（只是不占字段位置）。 */
-export function schemaKeys(nodeType: string): string[] {
-  const schema = NODE_SCHEMA[nodeType as NodeType]
-  if (!schema) return []
-  return [...schema.fields.map((f) => f.key), ...(schema.outputs || []).map((o) => o.param)]
-}
-
 /**
  * 把老参数补齐成新节点的完整参数集：
  *  - 老参数里有、新模式里也有的键 → **保留老值**（用户填过的东西不能丢）
@@ -693,5 +681,5 @@ export function schemaKeys(nodeType: string): string[] {
 export function mergeWithDefaults(nodeType: string, params: Record<string, any> | undefined): Record<string, any> {
   const base = defaultsFor(nodeType)
   const old = params && typeof params === 'object' ? params : {}
-  return { ...base, ...old }
+  const out={...base,...old};delete out.input_mode;return out
 }

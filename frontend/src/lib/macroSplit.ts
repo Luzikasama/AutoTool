@@ -168,19 +168,6 @@ export interface PackResult {
 }
 
 /**
- * 只有这四类节点能表达成「键鼠事件」；其余一律拒绝打包。
- *
- * 用白名单而不是黑名单：0.1.3 起节点从 10 个扩到 25 个，黑名单会被漏掉一半
- * （漏掉的表现是"打包成功、但某些参数被悄悄丢掉"，比直接拒绝危险得多）。
- */
-const PACKABLE: NodeType[] = ['mouse', 'keyboard', 'delay', 'record']
-
-/** 某个节点类型能否被打包进录制。 */
-export function canPack(nodeType: NodeType): boolean {
-  return PACKABLE.includes(nodeType)
-}
-
-/**
  * 把一串**按执行顺序排列**的节点打包成一个录制事件序列（拆分的逆操作）。
  *
  *  - 延时节点   → 时间轴向前推进（不产生事件）
@@ -190,6 +177,10 @@ export function canPack(nodeType: NodeType): boolean {
  *  - 其余节点（找图/判断/连点器/变量/系统…）→ 无法表达成键鼠事件，整体拒绝打包
  *
  * 只要有一个节点不能打包就返回 ok=false（不做部分打包），调用方据此提示用户。
+ *
+ * 判定在各 `case` 分支里完成（落到 `default` 即不可打包），是**白名单**语义：
+ * 0.1.3 起节点从 10 个扩到 25 个，黑名单会漏掉一半 —— 而"漏掉"的表现是
+ * 打包成功、某些参数被悄悄丢掉，比直接拒绝危险得多。
  */
 export function packStepsToMacro(steps: PackStep[]): PackResult {
   const events: any[] = []
@@ -275,11 +266,6 @@ export function packStepsToMacro(steps: PackStep[]): PackResult {
   if (badTypes.length) return { ok: false, events: [], badTypes }
   if (!events.length) return { ok: false, events: [], badTypes: [] }
   return { ok: true, events, badTypes: [] }
-}
-
-/** 把打包结果再拆一次，用于「拆分↔打包」往返测试与自检。 */
-export function splitAgain(events: any[], minGapMs = 80): MacroStep[] {
-  return expandPieces(compileMacroPieces(events), minGapMs)
 }
 
 /**

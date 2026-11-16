@@ -26,7 +26,6 @@ LEGACY_DIR_NAME = "AutoGameTool"
 
 _migrate_lock = threading.Lock()
 _migrate_done = False
-_migrate_note = ""
 
 
 def appdata_root() -> Path:
@@ -61,18 +60,13 @@ def migrate_from_legacy() -> int:
 
     返回补过来的条目数；任何异常都吞掉（迁移失败不影响启动）。
     """
-    global _migrate_note
     try:
         old = legacy_dir()
         if not old.is_dir():
             return 0
         new = appdata_root() / APP_DIR_NAME
-        moved = _copy_missing(old, new)
-        if moved:
-            _migrate_note = f"已从旧数据目录 {old} 补齐 {moved} 项到 {new}"
-        return moved
-    except Exception as e:
-        _migrate_note = f"迁移旧数据目录失败（忽略，改用新目录）：{type(e).__name__}: {e}"
+        return _copy_missing(old, new)
+    except Exception:
         return 0
 
 
@@ -98,8 +92,3 @@ def _copy_missing(src: Path, dst: Path) -> int:
         except Exception:
             continue
     return count
-
-
-def migration_note() -> str:
-    """最近一次迁移的结果说明（空串表示没有需要迁移的东西）。"""
-    return _migrate_note

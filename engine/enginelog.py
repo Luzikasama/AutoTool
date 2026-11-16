@@ -37,7 +37,6 @@ _LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warn": logging.WARNING
 
 _lock = threading.Lock()
 _ready = False
-_last_error = ""
 # 防重入标记（见 _StreamToLogger.write）
 _writing = threading.local()
 _logger = logging.getLogger("autotool")
@@ -76,15 +75,6 @@ def register_secret(value: str) -> None:
             _secrets.add(text)
     except Exception:
         pass
-
-
-def last_error() -> str:
-    """最近一次 setup() 失败的原因。
-
-    日志不可用时引擎照常运行（这是刻意的），但**必须留下原因**——
-    否则「为什么没有日志文件」会变成第二个查不出来的问题。
-    """
-    return _last_error
 
 
 def redact(text: str) -> str:
@@ -188,7 +178,7 @@ def _thread_excepthook(args) -> None:
 
 def setup(max_bytes: int = _DEFAULT_MAX_BYTES, backups: int = _DEFAULT_BACKUPS) -> Path | None:
     """安装文件日志（幂等）。返回日志路径；失败返回 None，且绝不影响引擎。"""
-    global _ready, _last_error
+    global _ready
     with _lock:
         if _ready:
             return log_path()
@@ -224,10 +214,18 @@ def setup(max_bytes: int = _DEFAULT_MAX_BYTES, backups: int = _DEFAULT_BACKUPS) 
             sys.excepthook = _excepthook
             threading.excepthook = _thread_excepthook
             _ready = True
-            _last_error = ""
             return path
         except Exception as e:
-            _last_error = f"{type(e).__name__}: {e}"
+            # 日志不可用时引擎照常运行（这是刻意的），但**必须留下原因** ——
+            # 否则「为什么没有日志文件」会变成第二个查不出来的问题。
+            # 此时唯一还能用的出口就是被接管前的原始 stderr；窗口化打包下它是 None，
+            # 那就确实无处可写，只能静默降级。
+            try:
+                if _orig_stderr:
+                    _orig_stderr.write(f"[enginelog] 日志不可用：{type(e).__name__}: {e}\n")
+                    _orig_stderr.flush()
+            except Exception:
+                pass
             return None
 
 

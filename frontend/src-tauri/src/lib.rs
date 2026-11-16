@@ -249,7 +249,13 @@ fn entry_url(token: &str) -> String {
     if cfg!(debug_assertions) {
         "http://localhost:1420/".to_string()
     } else {
-        format!("http://{ENGINE_ADDR}/?token={token}")
+        // URL 里带版本号：WebView2 的 HTTP 缓存是按 URL 存的，升级后 URL 一变就必然重新拉取。
+        // 不带的话，覆盖安装后旧 index.html 会继续命中缓存，页面还引用上一版已被删掉的 JS
+        // ——0.1.6 实测就出现过"装完新版本，打开的却是旧界面"。
+        format!(
+            "http://{ENGINE_ADDR}/?token={token}&v={}",
+            env!("CARGO_PKG_VERSION")
+        )
     }
 }
 

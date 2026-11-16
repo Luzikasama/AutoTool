@@ -15,6 +15,7 @@
 import asyncio
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "engine"))
@@ -38,9 +39,15 @@ def _rec(tag):
     return _fn
 
 
+def _click_down(x,y,button='left',mode='real',hwnd=None,**kwargs):
+    # 按一次实际点击的起点记账；保留旧断言使用的坐标、按钮、模式字段顺序。
+    _rec('click')(x,y,button,1,mode,hwnd)
+
+
 _stub(
     "inputctl",
     click=_rec("click"),
+    click_down=_click_down,
     press_key=_rec("key"),
     type_text=_rec("text"),
     move=_rec("move"),
@@ -50,6 +57,10 @@ _stub(
     key_down=_rec("key_down"),
     key_up=_rec("key_up"),
     cursor_pos=lambda: (0, 0),
+    input_owner=lambda owner: nullcontext(),
+    current_owner=lambda: None,
+    release_all=lambda **kwargs: 0,
+    InputSession=lambda: types.SimpleNamespace(closed=False),
 )
 _stub(
     "overlay",
@@ -326,7 +337,7 @@ async def case_subscripts() -> None:
         "scripts": {"S1": sub("S1", [click_node("k1", 11, 22)], [])},
     }
     ex, logs, visited = await drive(flow)
-    check("子脚本里的点击被执行过", len(CALLS) == 3, f"{len(CALLS)} 次（应为每轮 1 次）")
+    check("子脚本里的点击被执行过", sum(c[0]=='click' for c in CALLS) == 3, f"{sum(c[0]=='click' for c in CALLS)} 次（应为每轮 1 次）")
     check("点击坐标传到 inputctl", bool(CALLS) and CALLS[0][1][:2] == (11, 22), str(CALLS[:1]))
     check("父节点各执行 3 次", visited.count("n0") == 3 and visited.count("n2") == 3, str(visited))
     check("子脚本节点 k1 执行 3 次（不是 3×3）", visited.count("k1") == 3, str(visited))
@@ -458,20 +469,29 @@ async def case_input_nodes() -> None:
             {"id": "k1", "type": "keyboard", "params": {"action": "press", "keys": "ctrl+shift+a", "hold_ms": 0}},
             {"id": "k2", "type": "keyboard", "params": {"action": "down", "keys": "shift"}},
             {"id": "t1", "type": "text_input", "params": {"text": "你好", "method": "direct", "interval_ms": 0}},
+            # duration_ms > 0 走「平滑移动」：起点必须取自当前光标，而不是直接当成终点
+            {"id": "m6", "type": "mouse", "params": {"action": "move", "x": 100, "y": 100, "duration_ms": 160}},
         ],
         "edges": [
             edge("m1", "m2"), edge("m2", "m3"), edge("m3", "m4"), edge("m4", "m5"),
-            edge("m5", "k1"), edge("k1", "k2"), edge("k2", "t1"),
+            edge("m5", "k1"), edge("k1", "k2"), edge("k2", "t1"), edge("t1", "m6"),
         ],
     }
     ex, logs, visited = await drive(flow)
     tags = [c[0] for c in CALLS]
-    check("双击 → click(clicks=2)", any(c[0] == "click" and c[1][3] == 2 for c in CALLS), str(CALLS))
+    check("双击产生两个点击及两个松开", sum(c[0]=='click' and c[1][:2]==(10,20) for c in CALLS)==2 and sum(c[0]=='mouse_up' and c[1][:2]==(10,20) for c in CALLS)==2, str(CALLS))
     check("右键 → click(right)", any(c[0] == "click" and c[1][2] == "right" for c in CALLS), str(CALLS))
     check("滚轮 → scroll", "scroll" in tags, str(tags))
     check("按下/松开 → mouse_down / mouse_up", "mouse_down" in tags and "mouse_up" in tags, str(tags))
     check("组合键 → key_down + key_up", tags.count("key_down") >= 1 and tags.count("key_up") >= 1, str(tags))
     check("文本输入 → type_text", "text" in tags, str(tags))
+    moves = [c[1][:2] for c in CALLS if c[0] == "move"]
+    check(
+        "平滑移动 → 首帧从光标位置插值（不在终点）",
+        len(moves) > 1 and moves[0] != (100, 100),
+        str(moves[:3]),
+    )
+    check("平滑移动 → 末帧正好落在终点", bool(moves) and moves[-1] == (100, 100), str(moves[-2:]))
 
 
 async def case_resolution() -> None:
@@ -690,7 +710,7 @@ async def case_var_scope() -> None:
 
 
 async def case_input_mode_per_node() -> None:
-    print("[13] 输入方式跟着节点走（0.1.4 起不再有流程级单选）")
+    print("[13] 旧输入设置统一归一到真实键鼠")
     CALLS.clear()
     flow = {
         "name": "输入方式",
@@ -704,7 +724,7 @@ async def case_input_mode_per_node() -> None:
     await drive(flow)
     m1 = [c for c in CALLS if c[0] == "click" and c[1][:2] == (1, 2)]
     m2 = [c for c in CALLS if c[0] == "click" and c[1][:2] == (3, 4)]
-    check("节点写了 simulated → 用后台消息", bool(m1) and m1[0][1][4] == "simulated", str(m1))
+    check("节点遗留 simulated 字段 → 仍使用真实键鼠", bool(m1) and m1[0][1][4] == "real", str(m1))
     check("节点没写 → 回落到默认（真实键鼠）", bool(m2) and m2[0][1][4] == "real", str(m2))
 
     CALLS.clear()
@@ -717,7 +737,7 @@ async def case_input_mode_per_node() -> None:
     }
     await drive(flow2)
     mm = [c for c in CALLS if c[0] == "click" and c[1][:2] == (9, 9)]
-    check("老脚本的流程级 input_mode 仍作为兜底默认", bool(mm) and mm[0][1][4] == "simulated", str(mm))
+    check("流程级遗留 input_mode 不再启用后台消息", bool(mm) and mm[0][1][4] == "real", str(mm))
 
 
 async def case_output_var_optional() -> None:

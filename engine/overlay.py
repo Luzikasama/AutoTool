@@ -25,6 +25,8 @@ import ctypes
 import queue
 import threading
 import time
+import sys
+from pathlib import Path
 from ctypes import wintypes
 from typing import Callable
 
@@ -281,16 +283,19 @@ class Overlay:
 
         frame = tk.Frame(root, bg=_BG, highlightthickness=1, highlightbackground=_BORDER)
         frame.pack(fill="both", expand=True)
+        # 与 Vue 界面共用 Lucide 源图标；保持引用，避免 Tk 回收图片。
+        base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent.parent)) / 'assets' / 'lucide'
+        self._icons = {name: tk.PhotoImage(master=root, file=str(base / (name + '.png'))) for name in ('play','pause','square','circle-dot','x','panel-top','plus','minus')}
 
         # ---- 标题行 ----
         head = tk.Frame(frame, bg=_BG)
         head.pack(fill="x", padx=10, pady=(7, 0))
-        title = tk.Label(head, text="● AutoTool", bg=_BG, fg=_ACCENT,
+        title = tk.Label(head, text="AutoTool", bg=_BG, fg=_ACCENT,
                          font=(_FONT, 8, "bold"), anchor="w")
         title.pack(side="left")
         # 「回到界面」放右上角，用矢量图标而不是文字按钮（见 _mk_back_icon）。
         # pack 顺序决定位置：先 pack 的在最右，因此 ✕ 仍在最外侧。
-        close = tk.Label(head, text="✕", bg=_BG, fg=_FG_SUB, font=(_FONT, 9), cursor="hand2")
+        close = tk.Label(head, image=self._icons['x'], bg=_BG, cursor="hand2")
         close.pack(side="right")
         back = self._mk_back_icon(tk, head)
         back.pack(side="right", padx=(0, 6))
@@ -378,8 +383,11 @@ class Overlay:
         self._render()
 
     def _mkbtn(self, tk, parent, text, cmd, bg=_BTN_BG):
+        names = {'▶':'play','⏸':'pause','●':'circle-dot','＋':'plus','－':'minus'}
+        icon = names.get(text[0])
+        label = text[1:].strip() if icon else text
         return tk.Button(
-            parent, text=text, command=cmd, bg=bg, fg=_BTN_FG,
+            parent, text=label, image=self._icons.get(icon, ''), compound='left', command=cmd, bg=bg, fg=_BTN_FG,
             activebackground=_BTN_ACTIVE, activeforeground=_FG_MAIN,
             disabledforeground=_BTN_DISABLED,
             relief="flat", bd=0, highlightthickness=0,
@@ -397,18 +405,11 @@ class Overlay:
         尺寸/间距是调过的：18px 时三部分会糊成一团，20px + 1.4px 线宽
         才能在 100% 缩放下看清是「箭头 + 方框 + 方块」。
         """
-        cv = tk.Canvas(parent, width=20, height=20, bg=_BG,
+        cv = tk.Canvas(parent, width=24, height=24, bg=_BG,
                        highlightthickness=0, bd=0, cursor="hand2", takefocus=0)
         line = {"fill": _FG_MAIN, "width": 1.4, "capstyle": "round", "joinstyle": "round"}
-        items = [
-            # 左上角开口的方框（缺口留给箭头穿出）
-            cv.create_line(11.5, 3.5, 17.5, 3.5, 17.5, 14, 7.5, 14, 7.5, 8, **line),
-            # 箭头：杆 + 箭头尖
-            cv.create_line(8, 8.5, 2.5, 3, **line),
-            cv.create_line(2.5, 7, 2.5, 3, 6.5, 3, **line),
-            # 右下角的实心方块（与方框留出约 1.5px 间隙，不糊在一起）
-            cv.create_rectangle(11, 8.5, 16, 12.5, fill=_FG_MAIN, outline=""),
-        ]
+        cv.create_image(12, 12, image=self._icons['panel-top'])
+        items = []
 
         def paint(color: str) -> None:
             for item in items:
@@ -733,16 +734,16 @@ class Overlay:
             self._progress.config(text=text)
             self._step_lbl.config(text=brief)
             self._btn_run.config(
-                text="■ 停止" if self._running else "▶ 启动",
+                text="停止" if self._running else "启动", image=self._icons['square' if self._running else 'play'],
                 bg=_RUN_BG if self._running else _IDLE_BG,
             )
             self._btn_pause.config(
-                text="▶ 继续" if self._paused else "⏸ 暂停",
+                text="继续" if self._paused else "暂停", image=self._icons['play' if self._paused else 'pause'],
                 bg=_PAUSE_BG if self._paused else _BTN_BG,
                 state="normal" if self._running else "disabled",
             )
             self._btn_rec.config(
-                text="■ 停录" if self._recording else "● 录制",
+                text="停录" if self._recording else "录制", image=self._icons['square' if self._recording else 'circle-dot'],
                 bg=_REC_BG if self._recording else _BTN_BG,
             )
             # 循环次数：正在输入时不覆盖用户正在敲的内容，否则每次状态刷新都会把它擦掉

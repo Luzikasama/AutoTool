@@ -1,8 +1,13 @@
 ﻿# ============================================================
-#  AutoTool 一键打包脚本
-#  1) 构建前端（vue-tsc 类型检查 + vite build）
-#  2) PyInstaller 打包为单文件 exe（内嵌前端静态资源 + 应用图标）
-#  3) 复制到项目根目录
+#  AutoTool 引擎打包（前端 + PyInstaller onedir → AutoTool-app\）
+#
+#  1) 构建前端（vue-tsc 类型检查 + UI 组件导入检查 + vite build）
+#  2) PyInstaller 打成**文件夹形态**（--onedir，内嵌前端静态资源 + 应用图标）
+#  3) 复制为 AutoTool-app\（安装包会把它整个当作 resources 打进去）
+#
+#  注意：本脚本只产出「引擎目录」，**不产安装包** —— 要安装包用 build_desktop.ps1。
+#  文件名沿用历史的 `build_exe.ps1`（0.1.0 桌面化之前它确实产出过单文件 exe）：
+#  改名的收益不抵改动全部文档与既有约定的成本，故保留，但请按上面的实际行为理解。
 # ============================================================
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -86,6 +91,7 @@ try {
         # 还顺带锁死安装目录里的 exe，导致升级安装报「无法打开要写入的文件」。
         # 文件夹形态没有解压这一步，从根上消除这类故障，启动也更快。
         "--add-data", "$dist;frontend_dist",
+        "--add-data", "$(Join-Path $root 'assets');assets",
         "--hidden-import", "uvicorn.logging",
         "--hidden-import", "uvicorn.loops.auto",
         "--hidden-import", "uvicorn.protocols.http.auto",

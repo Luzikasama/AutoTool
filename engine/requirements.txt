@@ -1,6 +1,14 @@
+# AutoTool 引擎的直接依赖（不锁版本）。
+# 精确重建请用 requirements.lock.txt —— 那份才带版本号，也是构建机实际在用的组合。
+#
+# numpy 与 pywin32 是**直接 import** 的（`import numpy as np`、`win32clipboard`），
+# 虽然 opencv / pynput 会间接带上它们，但漏写会让"照 requirements.txt 装一遍"的环境
+# 在 import 阶段就崩 —— 直接依赖就该直接声明。
 fastapi
 uvicorn[standard]
 mss
 pynput
 opencv-python
+numpy
+pywin32
 rapidocr_onnxruntime

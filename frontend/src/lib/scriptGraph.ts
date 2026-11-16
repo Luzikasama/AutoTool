@@ -174,10 +174,3 @@ export function findAnyCycle(graph: Graph): string[] | null {
 export function chainText(ids: string[], nameOf: (id: string) => string): string {
   return ids.map((id) => (id === ROOT_NODE ? '主脚本' : nameOf(id))).join(' → ')
 }
-
-/** 顶层结束的调用节点类型名，便于在图上定位出边。 */
-export function scriptNameMap(scripts: Record<string, SubScript> | null | undefined): Map<string, string> {
-  const map = new Map<string, string>()
-  for (const [id, s] of Object.entries(normalizeScripts(scripts))) map.set(id, s.name)
-  return map
-}

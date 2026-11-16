@@ -1,4 +1,5 @@
 import type { WindowInfo } from '../types'
+import type { InputTraceSnapshot } from '../lib/inputTimeline'
 
 /** 一条全局快捷键绑定（标签由引擎给出，前端只负责显示与改键） */
 export interface HotkeyBinding {
@@ -115,18 +116,21 @@ export const engine = {
       '/vision/match',
       { template, threshold, window: win },
     ),
-  click: (x: number, y: number, button = 'left', clicks = 1, mode = 'real', win?: number | null) =>
-    apiPost('/input/click', { x, y, button, clicks, mode, window: win }),
-  key: (key: string, mode = 'real', win?: number | null) =>
-    apiPost('/input/key', { key, mode, window: win }),
-  text: (text: string, mode = 'real', win?: number | null) =>
-    apiPost('/input/text', { text, mode, window: win }),
+  click: (x: number, y: number, button = 'left', clicks = 1, _mode = 'real', win?: number | null) =>
+    apiPost('/input/click', { x, y, button, clicks, window: win }),
+  key: (key: string, _mode = 'real', win?: number | null) =>
+    apiPost('/input/key', { key, window: win }),
+  text: (text: string, _mode = 'real', win?: number | null) =>
+    apiPost('/input/text', { text, window: win }),
   run: (flow: unknown) => apiPost('/run', { flow }),
   loadFlow: (flow: unknown) => apiPost('/flow/load', { flow }),
   stop: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/stop'),
   pause: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/pause'),
   resume: () => apiPost<{ ok: boolean; running: boolean; paused: boolean }>('/run/resume'),
-  runState: () => apiGet<{ running: boolean; paused: boolean }>('/run/state'),
+  runState: () => apiGet<{ running: boolean; paused: boolean; repeat_state?:{doc_id:string;value:number;revision:number} }>('/run/state'),
+  inputSettings: () => apiGet<{background_click:boolean}>('/config/input'),
+  setInputSettings: (background_click:boolean) => apiPost<{background_click:boolean}>('/config/input', {background_click}),
+  timeline: (runId = '', afterSeq = 0) => apiGet<InputTraceSnapshot>(`/run/timeline?run_id=${encodeURIComponent(runId)}&after_seq=${afterSeq}`),
   overlayState: () =>
     apiGet<{
       enabled: boolean

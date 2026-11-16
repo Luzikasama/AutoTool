@@ -38,12 +38,6 @@ export interface SubScript {
   variables?: VarItem[]
 }
 
-/** 调用脚本节点的参数：只认 script_id（name 仅用于显示，丢了也能靠注册表补回来）。 */
-export interface ScriptCallParams {
-  script_id: string
-  name?: string
-}
-
 export interface FlowEdge {
   id: string
   source: string
@@ -83,19 +77,10 @@ export const GROUP_TYPE = 'group'
 
 export const GROUP_META = {
   label: '组合节点',
-  icon: '🧩',
+  icon: 'workflow',
   color: '#ec4899',
   desc: '把一串节点收成一个；双击进入编辑',
 } as const
-
-/** 组合节点内部那张图 + 局部变量的参数形状（存在节点的 params 里） */
-export interface GroupParams {
-  name: string
-  nodes: any[]
-  edges: any[]
-  /** 这个组合节点自己的「局部变量」声明 */
-  variables: VarItem[]
-}
 
 /**
  * 一条变量声明（右侧「变量」标签页里管理）。
@@ -112,6 +97,7 @@ export interface VarItem {
 }
 
 export const VAR_TYPES = [
+  { label: '坐标 (X, Y)', value: 'point' },
   { label: '自动识别', value: 'auto' },
   { label: '文本', value: 'string' },
   { label: '数字', value: 'number' },
@@ -131,12 +117,12 @@ export const CATEGORY_META: Record<
   NodeCategory,
   { label: string; index: string; icon: string; color: string; desc: string }
 > = {
-  input: { label: '输入', index: '①', icon: '🖱', color: '#3b82f6', desc: '执行动作：鼠标、键盘、文本、剪贴板' },
-  vision: { label: '视觉', index: '②', icon: '🎯', color: '#22c55e', desc: '看到什么：图像、文字、颜色、像素、区域' },
-  flow: { label: '流程', index: '③', icon: '🔀', color: '#06b6d4', desc: '控制执行：判断、循环、延时、等待、终止' },
-  tool: { label: '工具', index: '④', icon: '⚡', color: '#f97316', desc: '组合与外部能力：录制、连点、脚本调用、外部工具' },
-  data: { label: '数据', index: '⑤', icon: '🧮', color: '#a855f7', desc: '信息本身：变量、运算、文本处理' },
-  system: { label: '系统', index: '⑥', icon: '🪟', color: '#64748b', desc: '操作系统资源：窗口、进程、文件、命令' },
+  input: { label: '输入', index: '①', icon: 'mouse', color: '#3b82f6', desc: '执行动作：鼠标、键盘、文本、剪贴板' },
+  vision: { label: '视觉', index: '②', icon: 'find', color: '#22c55e', desc: '看到什么：图像、文字、颜色、像素、区域' },
+  flow: { label: '流程', index: '③', icon: 'branch', color: '#06b6d4', desc: '控制执行：判断、循环、延时、等待、终止' },
+  tool: { label: '工具', index: '④', icon: 'zap', color: '#f97316', desc: '组合与外部能力：录制、连点、脚本调用、外部工具' },
+  data: { label: '数据', index: '⑤', icon: 'calculator', color: '#a855f7', desc: '信息本身：变量、运算、文本处理' },
+  system: { label: '系统', index: '⑥', icon: 'window', color: '#64748b', desc: '操作系统资源：窗口、进程、文件、命令' },
 }
 
 /** 25 个核心节点的类型标识（规范第 17 节） */
@@ -153,6 +139,9 @@ export type NodeType =
   | 'pixel_check'
   | 'region_analysis'
   // ③ 流程
+  | 'parallel'
+  | 'join'
+  | 'scope'
   | 'judge'
   | 'loop'
   | 'delay'
@@ -183,36 +172,39 @@ export interface NodeMeta {
 
 export const NODE_META: Record<NodeType, NodeMeta> = {
   // ---------- ① 输入 ----------
-  mouse: { label: '鼠标操作', icon: '🖱', category: 'input', hint: '点击 / 双击 / 右键 / 移动 / 按下松开 / 滚轮' },
-  keyboard: { label: '键盘按键', icon: '⌨', category: 'input', hint: '单键 / 组合键 / 按下 / 松开' },
-  text_input: { label: '文本输入', icon: '📝', category: 'input', hint: '直接输入或经剪贴板输入到当前窗口' },
-  clipboard: { label: '剪贴板', icon: '📋', category: 'input', hint: '写入 / 读取 / 清空' },
+  mouse: { label: '鼠标操作', icon: 'mouse', category: 'input', hint: '点击 / 双击 / 右键 / 移动 / 按下松开 / 滚轮' },
+  keyboard: { label: '键盘按键', icon: 'keyboard', category: 'input', hint: '单键 / 组合键 / 按下 / 松开' },
+  text_input: { label: '文本输入', icon: 'text', category: 'input', hint: '直接输入或经剪贴板输入到当前窗口' },
+  clipboard: { label: '剪贴板', icon: 'clipboard', category: 'input', hint: '写入 / 读取 / 清空' },
   // ---------- ② 视觉 ----------
-  find_image: { label: '图像识别', icon: '🎯', category: 'vision', hint: '在屏幕或指定区域内寻找模板图' },
-  ocr: { label: '文字识别', icon: '🔍', category: 'vision', hint: '对指定区域做 OCR，输出文本' },
-  color_check: { label: '颜色检测', icon: '🎨', category: 'vision', hint: '区域内是否出现指定颜色' },
-  pixel_check: { label: '像素检测', icon: '📍', category: 'vision', hint: '精确比对一个点（或小方块）的颜色' },
-  region_analysis: { label: '区域分析', icon: '🖼', category: 'vision', hint: '区域是否变化 / 平均颜色 / 截图' },
+  find_image: { label: '图像识别', icon: 'find', category: 'vision', hint: '在整屏或绑定窗口内寻找模板图' },
+  ocr: { label: '文字识别', icon: 'search', category: 'vision', hint: '对指定区域做 OCR，输出文本' },
+  color_check: { label: '颜色检测', icon: 'palette', category: 'vision', hint: '区域内是否出现指定颜色' },
+  pixel_check: { label: '像素检测', icon: 'pin', category: 'vision', hint: '精确比对一个点（或小方块）的颜色' },
+  region_analysis: { label: '区域分析', icon: 'image', category: 'vision', hint: '区域是否变化 / 平均颜色 / 截图' },
   // ---------- ③ 流程 ----------
-  judge: { label: '判断', icon: '🔀', category: 'flow', hint: '按条件走「是 / 否」分支' },
-  loop: { label: '循环', icon: '🔁', category: 'flow', hint: '固定次数 / 条件循环 / 无限循环' },
-  delay: { label: '延时', icon: '⏱', category: 'flow', hint: '无条件等待指定时间' },
-  wait: { label: '等待', icon: '⏳', category: 'flow', hint: '等到条件满足（图片出现、变量达标…）' },
-  terminate: { label: '终止', icon: '🛑', category: 'flow', hint: '终止当前节点 / 循环 / 脚本 / 整个工作流' },
+  parallel: {label:'并行分支',icon:'fork',category:'flow',hint:'同时执行多条路径，自动创建配对汇合节点'},
+  join: {label:'汇合',icon:'merge',category:'flow',hint:'定位所选并行分支的汇合节点；尚无分支时创建一对'},
+  scope: {label:'作用域',icon:'variable',category:'flow',hint:'局部变量边界'},
+  judge: { label: '判断', icon: 'branch', category: 'flow', hint: '按条件走「是 / 否」分支' },
+  loop: { label: '循环', icon: 'repeat', category: 'flow', hint: '固定次数 / 条件循环 / 无限循环' },
+  delay: { label: '延时', icon: 'timer', category: 'flow', hint: '无条件等待指定时间' },
+  wait: { label: '等待', icon: 'wait', category: 'flow', hint: '等到条件满足（图片出现、变量达标…）' },
+  terminate: { label: '终止', icon: 'stop', category: 'flow', hint: '终止当前节点 / 循环 / 脚本 / 整个工作流' },
   // ---------- ④ 工具 ----------
-  record: { label: '键鼠录制', icon: '⏺', category: 'tool', hint: '录一段操作，停止后生成普通节点' },
-  autoclick: { label: '连点器', icon: '⚡', category: 'tool', hint: '高频连点：坐标 + 次数 + 间隔' },
-  script_call: { label: '调用脚本', icon: '📦', category: 'tool', hint: '执行另一个脚本（子脚本嵌套）' },
-  external_tool: { label: '外部工具', icon: '🔌', category: 'tool', hint: '调用外部程序 / HTTP 接口 / 插件' },
+  record: { label: '键鼠录制', icon: 'record', category: 'tool', hint: '录一段操作，停止后生成普通节点' },
+  autoclick: { label: '连点器', icon: 'zap', category: 'tool', hint: '高频连点：坐标 + 次数 + 间隔' },
+  script_call: { label: '调用脚本', icon: 'package', category: 'tool', hint: '执行另一个脚本（子脚本嵌套）' },
+  external_tool: { label: '外部工具', icon: 'plug', category: 'tool', hint: '运行外部程序 / 请求 HTTP 接口' },
   // ---------- ⑤ 数据 ----------
-  variable: { label: '变量', icon: '🏷', category: 'data', hint: '新建 / 赋值 / 读取 / 删除' },
-  calculate: { label: '运算', icon: '🧮', category: 'data', hint: '数学、比较、逻辑、赋值' },
-  text_process: { label: '文本处理', icon: '🔤', category: 'data', hint: '拼接、截取、替换、正则、转数字…' },
+  variable: { label: '变量', icon: 'variable', category: 'data', hint: '新建 / 赋值 / 读取 / 删除' },
+  calculate: { label: '运算', icon: 'calculator', category: 'data', hint: '数学、比较、逻辑、赋值' },
+  text_process: { label: '文本处理', icon: 'case', category: 'data', hint: '拼接、截取、替换、正则、转数字…' },
   // ---------- ⑥ 系统 ----------
-  window: { label: '窗口', icon: '🪟', category: 'system', hint: '查找 / 激活 / 最小化 / 移动 / 取信息' },
-  process: { label: '进程', icon: '⚙', category: 'system', hint: '启动 / 关闭 / 是否在运行 / 取信息' },
-  file: { label: '文件', icon: '📁', category: 'system', hint: '读 / 写 / 复制 / 移动 / 删除 / 存在性' },
-  command: { label: '命令', icon: '⌘', category: 'system', hint: '执行 CMD / PowerShell / Bash 命令' },
+  window: { label: '窗口', icon: 'window', category: 'system', hint: '查找 / 激活 / 最小化 / 移动 / 取信息' },
+  process: { label: '进程', icon: 'settings', category: 'system', hint: '启动 / 关闭 / 是否在运行 / 取信息' },
+  file: { label: '文件', icon: 'folder', category: 'system', hint: '读 / 写 / 复制 / 移动 / 删除 / 存在性' },
+  command: { label: '命令', icon: 'terminal', category: 'system', hint: '执行 CMD / PowerShell / Bash 命令' },
 }
 
 /** 按类目取节点（面板用它分组渲染，顺序与规范一致） */
@@ -220,13 +212,6 @@ export function nodesOfCategory(cat: NodeCategory): Array<[NodeType, NodeMeta]> 
   return (Object.entries(NODE_META) as Array<[NodeType, NodeMeta]>).filter(
     ([, m]) => m.category === cat,
   )
-}
-
-/** 节点配色 = 它所属类目的颜色；组合节点不属于任何类目，单给一个色。 */
-export function nodeColor(t: string): string {
-  if (t === GROUP_TYPE) return GROUP_META.color
-  const m = NODE_META[t as NodeType]
-  return m ? CATEGORY_META[m.category].color : '#888'
 }
 
 /**
@@ -247,9 +232,6 @@ export const LEGACY_TYPE_MAP: Record<string, NodeType> = {
   autoclick: 'autoclick',
   script_call: 'script_call',
 }
-
-/** 老的「判断分支」（找图 + 分支）节点 —— 加载时会被拆开 */
-export const LEGACY_JUDGE = 'judge'
 
 export interface LogEntry {
   level: string
@@ -279,12 +261,7 @@ export interface BoundWindow {
 
 export interface FlowFile {
   format: 'agflow'
-  /**
-   * 1 = 0.1.1 及更早（无 scripts）
-   * 2 = 0.1.2 起（可携带子脚本）
-   * 3 = 0.1.4 起（变量管理：主脚本的 variables + 子脚本/组合节点的局部变量；
-   *     输入方式从流程级单选取下，改为挂在各输入节点上）。读取时 1/2/3 都接受。
-   */
+  /** 格式 6：同画布分叉/汇合、局部边界、绝对录制时间；布局偏好独立保存。 */
   version: number
   name: string
   repeat: number

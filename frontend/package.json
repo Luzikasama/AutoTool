@@ -1,23 +1,33 @@
 {
   "name": "autotool",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.3.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test:connection": "node ../tools/test_engine_connection.mjs",
+    "test:timeline": "node ../tools/test_input_timeline.mjs",
+    "test:timed-segment": "node ../tools/test_timed_segment.mjs",
+    "test:timeline-ui": "node ../tools/test_timeline_ui.mjs",
+    "test:simple": "node ../tools/test_simple_mode.mjs",
+    "test:axes": "node ../tools/test_parallel_timeline.mjs",
+    "test:modes-ui": "node ../tools/test_modes_ui.mjs",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:flat": "node ../tools/test_flat_flow.mjs",
+    "test:workspace": "node ../tools/test_workspace_ui.mjs",
+    "test:editor": "node ../tools/test_editor_031.mjs && node ../tools/test_editor_032.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.0",
     "@vue-flow/background": "^1.0.0",
     "@vue-flow/controls": "^1.0.0",
     "@vue-flow/core": "^1.0.0",
     "naive-ui": "^2.44.1",
     "pinia": "^3.0.4",
     "vue": "^3.5.13",
-    "vue-router": "^4.6.4"
+    "vue-router": "^4.6.4",
+    "@lucide/vue": "1.73.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.0",
